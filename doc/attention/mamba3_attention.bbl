@@ -1,0 +1,26 @@
+\begin{thebibliography}{1}
+
+\bibitem{mamba3}
+Aakash Lahoti, Kevin~Y. Li, Berlin Chen, Caitlin Wang, Aviv Bick, J.~Zico
+  Kolter, Tri Dao, and Albert Gu.
+\newblock Mamba-3: Improved sequence modeling using state space principles.
+\newblock {\em arXiv preprint arXiv:2603.15569}, 2026.
+
+\bibitem{depthanything3}
+Haotong Lin, Sili Chen, Jun~Hao Liew, Donny~Y. Chen, Zhenyu Li, Guang Shi,
+  Jiashi Feng, and Bingyi Kang.
+\newblock Depth anything 3: Recovering the visual space from any views.
+\newblock {\em arXiv preprint arXiv:2511.10647}, 2025.
+
+\bibitem{vssd}
+Yuheng Shi, Mingjia Li, Minjing Dong, and Chang Xu.
+\newblock Vssd: Vision mamba with non-causal state space duality.
+\newblock In {\em Proceedings of the IEEE/CVF International Conference on
+  Computer Vision (ICCV)}, 2025.
+
+\bibitem{rmsnorm}
+Biao Zhang and Rico Sennrich.
+\newblock Root mean square layer normalization.
+\newblock {\em arXiv preprint arXiv:1910.07467}, 2019.
+
+\end{thebibliography}

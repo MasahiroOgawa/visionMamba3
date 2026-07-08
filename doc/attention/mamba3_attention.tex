@@ -1,0 +1,2002 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage{amsmath,amssymb}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{array}
+\usepackage{bm}
+
+\title{Self-Attention and Cross-Attention via Mamba-3, and Their Application to Images}
+\author{Masahiro Ogawa}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note derives, step by step, how the Mamba-3 state space model
+(SSM) can be used as a drop-in replacement for both self-attention and
+cross-attention, and how the resulting attention blocks are assembled
+into an image model. We follow the notation of the original Mamba-3
+paper so every equation can be checked against the source. The
+guiding principle is that every algebraic move is shown with its
+justification. A reader who knows matrix multiplication and
+elementary calculus should be able to follow the whole note without
+guessing.
+\end{abstract}
+
+\tableofcontents
+
+%% ================================================================
+\section{Preliminaries and Notation}
+%% ================================================================
+
+We summarize the symbols used throughout. The names match
+\cite{mamba3}, Section~2 and Section~3.
+
+\subsection{Sizes}
+
+\begin{itemize}
+  \item $T$: sequence length (number of tokens). For images we will
+        set $T = L = HW/P^2$ where $H,W$ are the image height and
+        width and $P$ is the patch size.
+  \item $D$: model (channel) dimension.
+  \item $N$: SSM state dimension (per SSM head).
+  \item $R$: MIMO rank (Mamba-3, \S 3.3). For SISO, $R=1$.
+\end{itemize}
+
+\subsection{Tokens and projections}
+
+\begin{itemize}
+  \item $\bm{X} \in \mathbb{R}^{T\times D}$ is the input sequence;
+        the $t$-th row $\bm{x}_t \in \mathbb{R}^{D}$ is one token.
+  \item $\bm{B}, \bm{C} \in \mathbb{R}^{T\times N}$ are data-dependent
+        projections; the $t$-th rows are $\bm{B}_t, \bm{C}_t \in
+        \mathbb{R}^{N}$.
+  \item $\Delta_t \in \mathbb{R}_{>0}$ is a data-dependent step size.
+  \item $A_t \in \mathbb{R}_{<0}$ is a data-dependent (in Mamba-3) or
+        data-independent (in Mamba-2) scalar that governs decay.
+  \item $\bm{h}_t \in \mathbb{R}^{N}$ is the hidden state at time $t$
+        (SISO; see \S\ref{sec:mimo} for MIMO).
+  \item $\bm{Y} \in \mathbb{R}^{T\times D}$ is the output sequence.
+\end{itemize}
+
+In terms of an input token $\bm{x}_t$, the learned projections are
+\begin{align}
+  \bm{B}_t       &= \bm{W}_B\,\bm{x}_t  & \bm{W}_B &\in \mathbb{R}^{N\times D}, \label{eq:projB}\\
+  \bm{C}_t       &= \bm{W}_C\,\bm{x}_t  & \bm{W}_C &\in \mathbb{R}^{N\times D}, \label{eq:projC}\\
+  \Delta_t       &= \mathrm{Softplus}(\bm{w}_\Delta^\top \bm{x}_t)
+                                         & \bm{w}_\Delta &\in \mathbb{R}^{D}, \label{eq:projD}\\
+  A_t            &= -\mathrm{Softplus}(\bm{w}_A^\top \bm{x}_t)
+                                         & \bm{w}_A &\in \mathbb{R}^{D} \text{ (optional data-dep.)}. \label{eq:projA}
+\end{align}
+Here $\mathrm{Softplus}$ is the smooth, strictly positive activation
+\begin{equation}\label{eq:softplus}
+  \mathrm{Softplus}(z) := \log\bigl(1 + e^{z}\bigr),
+  \qquad \mathrm{Softplus}:\mathbb{R}\to\mathbb{R}_{>0},
+\end{equation}
+so \eqref{eq:projD} guarantees $\Delta_t > 0$ and \eqref{eq:projA}
+guarantees $A_t < 0$, which is what the discretization in
+\eqref{eq:abc} requires for $\alpha_t = e^{\Delta_t A_t} \in (0,1)$.
+
+The value projection that we will feed into the SSM is
+\begin{equation}\label{eq:projV}
+  \bm{v}_t = \mathrm{SiLU}(\bm{W}_V\,\bm{x}_t),
+  \qquad \bm{W}_V \in \mathbb{R}^{D\times D},
+\end{equation}
+where $\mathrm{SiLU}$ (a.k.a.\ Swish) is the smooth, self-gated activation
+\begin{equation}\label{eq:silu}
+  \mathrm{SiLU}(z) := z\,\sigma(z) = \frac{z}{1 + e^{-z}},
+  \qquad
+  \sigma(z) := \frac{1}{1 + e^{-z}},
+\end{equation}
+applied element-wise to the vector $\bm{W}_V\bm{x}_t \in \mathbb{R}^{D}$.
+
+We also use $\mathrm{softmax}$ when comparing SSD to standard
+attention. For a row vector $\bm{z}=(z_1,\dots,z_T)\in\mathbb{R}^{T}$,
+\begin{equation}\label{eq:softmax}
+  \mathrm{softmax}(\bm{z})_j \;:=\; \frac{e^{z_j}}{\sum_{k=1}^{T} e^{z_k}},
+  \qquad j=1,\dots,T,
+\end{equation}
+so the entries of $\mathrm{softmax}(\bm{z})$ are non-negative and sum
+to $1$. Applied to a matrix
+$\bm{S}\in\mathbb{R}^{T\times T}$ as $\mathrm{softmax}(\bm{S})$, the
+operator is taken \emph{row-wise} — each row of $\bm{S}$ is independently
+mapped through \eqref{eq:softmax}, so each row of
+$\mathrm{softmax}(\bm{S})$ sums to $1$. In standard scaled-dot-product
+attention this is what enforces ``each query's attention weights form
+a probability distribution over the keys'':
+\[
+  \bm{Y} \;=\; \mathrm{softmax}\!\bigl(\bm{Q}\bm{K}^\top/\sqrt{d}\bigr)\,\bm{V}.
+\]
+The Mamba-3 SSD parallel form \eqref{eq:ssd} replaces this row-wise
+softmax with element-wise multiplication by a learned mask
+$\bm{L}$, dropping both the exponential and the row normalisation.
+
+\subsection{RMSNorm and BCNorm}
+\label{sec:bcnorm}
+
+Mamba-3 normalizes the key/query projections $\bm{B}_t,\bm{C}_t$ before
+using them in the SSD kernel. The underlying primitive is
+\emph{RMSNorm} \cite{rmsnorm}, which rescales a vector by its
+root-mean-square (no mean subtraction, unlike LayerNorm):
+\begin{equation}\label{eq:rmsnorm}
+  \mathrm{RMSNorm}(\bm{u}) := \frac{\bm{u}}{\sqrt{\tfrac{1}{N}\sum_{i=1}^{N} u_i^{2} + \varepsilon}}\;\odot\;\bm{g},
+  \qquad \bm{u}\in\mathbb{R}^{N},
+\end{equation}
+where $\bm{g}\in\mathbb{R}^{N}$ is a learnable per-channel gain,
+$\varepsilon>0$ is a small constant, and $\odot$ is the Hadamard
+product. The output has unit RMS up to the learned gain, which
+stabilizes the inner products $\bm{C}_i^\top\bm{B}_j$ that appear in
+\eqref{eq:ssd}.
+
+\emph{BCNorm} (\cite{mamba3} \S 3.4) is simply RMSNorm applied
+independently to $\bm{B}_t$ and $\bm{C}_t$, followed by a learnable
+channel-wise bias:
+\begin{equation}\label{eq:bcnorm}
+  \bm{B}_t \leftarrow \mathrm{RMSNorm}(\bm{B}_t) + \bm{b}_B,
+  \qquad
+  \bm{C}_t \leftarrow \mathrm{RMSNorm}(\bm{C}_t) + \bm{b}_C,
+  \qquad \bm{b}_B,\bm{b}_C \in \mathbb{R}^{N}.
+\end{equation}
+We will write ``apply BCNorm'' as shorthand for the substitution
+\eqref{eq:bcnorm}; each occurrence of $\bm{B}_t,\bm{C}_t$ in later
+equations is understood to be the post-BCNorm version when the
+algorithm calls for it.
+
+\subsection{Recurrence, parallel form, and decay factors}
+
+Mamba-3 uses the \emph{exponential-trapezoidal} discrete recurrence of
+\cite{mamba3} eq.~(5)–(6):
+\begin{equation}\label{eq:rec3}
+  \bm{h}_t = \alpha_t\,\bm{h}_{t-1}
+            + \beta_t\,\bm{B}_{t-1}\bm{x}_{t-1}
+            + \gamma_t\,\bm{B}_t\bm{x}_t,
+  \qquad
+  \bm{y}_t = \bm{C}_t^\top\bm{h}_t,
+\end{equation}
+with the three data-dependent scalars
+\begin{equation}\label{eq:abc}
+  \alpha_t := e^{\Delta_t A_t},
+  \qquad
+  \beta_t  := (1 - \lambda_t)\,\Delta_t\,e^{\Delta_t A_t},
+  \qquad
+  \gamma_t := \lambda_t\,\Delta_t,
+\end{equation}
+where $\lambda_t \in [0,1]$ is a learned, data-dependent convex weight.
+Setting $\lambda_t \equiv 1$ recovers Mamba-2's two-term recurrence
+\begin{equation}\label{eq:rec2}
+  \bm{h}_t = \alpha_t\,\bm{h}_{t-1} + \gamma_t\,\bm{B}_t\,\bm{x}_t,
+  \qquad
+  \bm{y}_t = \bm{C}_t^\top\,\bm{h}_t,
+\end{equation}
+which is \cite{mamba3} eq.~(1). Mamba-3's \emph{parallel} form
+(\cite{mamba3} eq.~(2)) reads
+\begin{equation}\label{eq:ssd}
+  \bm{Y} = \bigl(\bm{L}\odot\bm{C}\bm{B}^\top\bigr)\bm{X},
+\end{equation}
+with $\odot$ the Hadamard product and $\bm{L}\in\mathbb{R}^{T\times T}$
+a structured lower-triangular mask that we derive explicitly in
+Section~\ref{sec:ssd}. This single equation is the bridge between
+recurrences and attention: the next section is devoted to explaining
+exactly why.
+
+\subsection{What this note actually does}
+
+Using only the objects above, we will:
+
+\begin{enumerate}
+  \item Derive \eqref{eq:ssd} from \eqref{eq:rec2} and
+        \eqref{eq:rec3}, and read it as \emph{linear attention with a
+        learned mask} (Section~\ref{sec:ssd}).
+  \item Plug real projections into \eqref{eq:ssd} to get a Mamba-3
+        self-attention block (Section~\ref{sec:self}).
+  \item Repeat for two different sequences and obtain Mamba-3 cross-
+        attention, in two flavours: state-compressed (cheap,
+        constant-memory) and token-level (exact SSD analogue of
+        softmax cross-attention) (Section~\ref{sec:cross}).
+  \item Patchify an image, make the scan bidirectional, and use the
+        self/cross-attention blocks to build an image encoder; then
+        combine several views via cross-view attention for the 3-D
+        setting (Section~\ref{sec:images}).
+  \item Derive the \emph{non-causal SSD} (NC-SSD) of \cite{vssd}
+        as an algebraic alternative to bidirectional scans, and show
+        that it collapses the structured $T\times T$ mask $\bm{L}$ to
+        a single learned $T$-vector $\bm{m}$
+        (Section~\ref{sec:ncssd}).
+\end{enumerate}
+
+%% ================================================================
+\section{Why SSD $\equiv$ linear attention (the duality, derived)}
+\label{sec:ssd}
+%% ================================================================
+
+We derive \eqref{eq:ssd} directly from the recurrence. Work entirely
+with the two-term form \eqref{eq:rec2} first; the three-term form
+\eqref{eq:rec3} is a corollary (\S\ref{sec:trap}).
+
+\subsection{Unrolling the two-term recurrence}
+
+Starting from $\bm{h}_0 = \bm{0}$ and applying \eqref{eq:rec2} once:
+\begin{equation}\label{eq:un1}
+  \bm{h}_1 = \alpha_1\,\bm{h}_0 + \gamma_1\,\bm{B}_1\bm{x}_1
+           = \gamma_1\,\bm{B}_1\bm{x}_1.
+\end{equation}
+Apply it once more:
+\begin{align}
+  \bm{h}_2 &= \alpha_2\,\bm{h}_1 + \gamma_2\,\bm{B}_2\bm{x}_2 \nonumber \\
+           &= \alpha_2\,\gamma_1\,\bm{B}_1\bm{x}_1
+             + \gamma_2\,\bm{B}_2\bm{x}_2. \label{eq:un2}
+\end{align}
+By induction on $t$ we claim
+\begin{equation}\label{eq:un-claim}
+  \bm{h}_t \;=\; \sum_{j=1}^{t}
+     \underbrace{\Bigl(\prod_{k=j+1}^{t}\alpha_k\Bigr)}_{=:\,a_{t\leftarrow j}}
+     \gamma_j\,\bm{B}_j\bm{x}_j,
+\end{equation}
+where by convention an empty product equals $1$ (so
+$a_{t\leftarrow t} = 1$).
+
+\emph{Proof of the induction step.} Assume \eqref{eq:un-claim} at
+time $t-1$. Substitute into \eqref{eq:rec2}:
+\begin{align}
+  \bm{h}_t
+   &= \alpha_t\,\bm{h}_{t-1} + \gamma_t\,\bm{B}_t\bm{x}_t \\
+   &= \alpha_t \sum_{j=1}^{t-1}
+        \Bigl(\prod_{k=j+1}^{t-1}\alpha_k\Bigr)\gamma_j\bm{B}_j\bm{x}_j
+        + \gamma_t\,\bm{B}_t\bm{x}_t \\
+   &= \sum_{j=1}^{t-1}
+        \Bigl(\prod_{k=j+1}^{t}\alpha_k\Bigr)\gamma_j\bm{B}_j\bm{x}_j
+        + \gamma_t\,\bm{B}_t\bm{x}_t
+        \qquad\text{(absorb $\alpha_t$ into the product)}\\
+   &= \sum_{j=1}^{t}
+        \Bigl(\prod_{k=j+1}^{t}\alpha_k\Bigr)\gamma_j\bm{B}_j\bm{x}_j.
+\end{align}
+The last equality uses the empty-product convention for $j=t$. This
+proves \eqref{eq:un-claim}.
+
+\subsection{From state to output}
+
+Plug \eqref{eq:un-claim} into the output equation
+$\bm{y}_t = \bm{C}_t^\top\bm{h}_t$:
+\begin{align}
+  \bm{y}_t
+   &= \bm{C}_t^\top \sum_{j=1}^{t}
+        a_{t\leftarrow j}\,\gamma_j\,\bm{B}_j\bm{x}_j \\
+   &= \sum_{j=1}^{t}
+        a_{t\leftarrow j}\,\gamma_j\,
+        \underbrace{\bm{C}_t^\top \bm{B}_j}_{\text{scalar}}\;\bm{x}_j
+        \qquad\text{(linearity of $\bm{C}_t^\top(\cdot)$)} \label{eq:yout} \\
+   &= \sum_{j=1}^{t}
+        \underbrace{\bigl(a_{t\leftarrow j}\,\gamma_j\bigr)}_{=:\,L_{tj}}
+        \bigl(\bm{C}_t^\top \bm{B}_j\bigr)\,\bm{x}_j. \label{eq:yout-L}
+\end{align}
+The key observation is that $\bm{x}_j$ is a vector while
+$\bm{C}_t^\top\bm{B}_j$ is a scalar; we are free to reorder the
+factors.
+
+\subsection{Matrix form: $\bm{Y} = (\bm{L}\odot \bm{C}\bm{B}^\top)\bm{X}$}
+
+Define the lower-triangular matrix
+\begin{equation}\label{eq:L2}
+  L_{tj} \;=\;
+  \begin{cases}
+     \gamma_j\displaystyle\prod_{k=j+1}^{t}\alpha_k & j \le t,\\[4pt]
+     0 & j > t.
+  \end{cases}
+\end{equation}
+Equivalently,
+\begin{equation}\label{eq:Lmat}
+  \bm{L} \;=\;
+  \begin{bmatrix}
+     1    &      &       &      \\
+     \alpha_2 & 1 &       &      \\
+     \alpha_3\alpha_2 & \alpha_3 & 1 &   \\
+     \vdots & & \ddots & \\
+     \prod_{k=2}^{T}\alpha_k & \cdots & \alpha_T & 1
+  \end{bmatrix}\cdot\mathrm{diag}(\gamma_1,\dots,\gamma_T),
+\end{equation}
+which is the Mamba-2 mask of \cite{mamba3} eq.~(3). Using
+\eqref{eq:yout-L} row by row,
+\begin{equation}\label{eq:rowform}
+  \bm{y}_t \;=\; \sum_{j=1}^{T} L_{tj}\,\bigl(\bm{C}_t^\top \bm{B}_j\bigr)\,\bm{x}_j
+         \;=\; \sum_{j=1}^{T}
+                \bigl[\,\bm{L}\odot\bm{C}\bm{B}^\top\,\bigr]_{tj}\,\bm{x}_j.
+\end{equation}
+(Terms with $j>t$ vanish because $L_{tj}=0$.) Stacking over $t$,
+\begin{equation}\label{eq:ssd-derived}
+  \boxed{\;\bm{Y} \;=\; \bigl(\bm{L}\odot \bm{C}\bm{B}^\top\bigr)\bm{X}.\;}
+\end{equation}
+This is exactly \eqref{eq:ssd} (\cite{mamba3} eq.~(2)).
+
+\subsection{Reading the SSD identity as linear attention}
+
+Define the standard attention quantities
+\begin{equation}
+  \bm{Q}_t := \bm{C}_t,\qquad \bm{K}_j := \bm{B}_j,\qquad \bm{V}_j := \bm{x}_j.
+\end{equation}
+Then \eqref{eq:ssd-derived} is
+\begin{equation}\label{eq:attn}
+  \bm{Y} \;=\; \bigl(\bm{L}\odot \bm{Q}\bm{K}^\top\bigr)\bm{V},
+\end{equation}
+which is \emph{linear attention} (no softmax, no row normalization),
+with a data-dependent, structured mask $\bm{L}$. Compare to standard
+softmax self-attention
+$\bm{Y} = \mathrm{softmax}(\bm{Q}\bm{K}^\top / \sqrt{d})\,\bm{V}$:
+\begin{itemize}
+  \item Standard attention computes a dense $T\times T$ similarity
+        matrix $\bm{Q}\bm{K}^\top$ and row-normalizes it by softmax.
+  \item Mamba-3 SSD computes the same $\bm{Q}\bm{K}^\top$, then
+        multiplies it elementwise by a learned mask $\bm{L}$ whose
+        off-diagonal entries decay geometrically in $|t-j|$.
+  \item The decay factor $\prod_{k=j+1}^{t}\alpha_k$ plays the role of
+        a relative-position bias: tokens separated by large
+        $\sum_{k}\Delta_k |A_k|$ contribute exponentially less.
+\end{itemize}
+
+\subsection{Trapezoidal three-term form}\label{sec:trap}
+
+The same derivation goes through for \eqref{eq:rec3}. We show only
+the new piece: the mask acquires an extra two-band contribution.
+Substitute \eqref{eq:rec3} once,
+\begin{align}
+  \bm{h}_t
+   &= \alpha_t\,\bm{h}_{t-1}
+     + \beta_t\,\bm{B}_{t-1}\bm{x}_{t-1}
+     + \gamma_t\,\bm{B}_t\bm{x}_t.
+\end{align}
+Iterating (compare \eqref{eq:un-claim}) gives
+\begin{equation}\label{eq:un3}
+  \bm{h}_t = \sum_{j=1}^{t}
+     \Bigl(\prod_{k=j+1}^{t}\alpha_k\Bigr)\!\bigl(\gamma_j\,\bm{B}_j\bm{x}_j
+                                               + \beta_j\,\bm{B}_{j-1}\bm{x}_{j-1}\bigr),
+\end{equation}
+where the $\beta_j$ term contributes to the state via
+$\bm{B}_{j-1}\bm{x}_{j-1}$. Plugging into
+$\bm{y}_t = \bm{C}_t^\top\bm{h}_t$ and collecting coefficients of
+$\bm{B}_j\bm{x}_j$ (note the index shift for the $\beta$ term), one
+obtains
+\begin{equation}\label{eq:L3}
+  L_{tj} \;=\; \Bigl(\prod_{k=j+1}^{t}\alpha_k\Bigr)\gamma_j
+            \;+\; \Bigl(\prod_{k=j+2}^{t}\alpha_k\Bigr)\beta_{j+1}
+            \quad \text{for } j\le t,
+\end{equation}
+with the usual empty-product convention. In matrix form this is
+\cite{mamba3} eq.~(7): $\bm{L}$ is the product of a
+1-semiseparable matrix (whose $(t,j)$ entry is
+$\prod_{k=j+1}^{t}\alpha_k$) and a two-band matrix
+$\mathrm{diag}(\gamma_0,\dots,\gamma_T) + \mathrm{subdiag}(\beta_1,\dots,\beta_T)$.
+Equations \eqref{eq:rowform}–\eqref{eq:ssd-derived} are unchanged.
+
+\paragraph{Boundary conditions of the $\beta$ band.} The second term in
+\eqref{eq:L3} references $\beta_{j+1}$. For the left endpoint, the
+recurrence \eqref{eq:rec3} at $t=1$ uses $\beta_1 \bm{B}_0\bm{x}_0$
+with $\bm{B}_0, \bm{x}_0$ out of range; we therefore adopt the
+convention $\beta_1 := 0$, or equivalently drop this term when
+$t=1$. Consistently, $\beta_1$ never appears in \eqref{eq:L3}: the
+second term at $j=0$ would need $\beta_1$, but $j\ge 1$ by indexing.
+For the right endpoint, at $j=t$ the expression $\beta_{j+1}=\beta_{t+1}$
+is undefined; we set $\beta_{T+1} := 0$ so the second term vanishes
+at $j=t$, leaving $L_{tt} = \gamma_t$ as expected. Any implementation
+that pads $\beta$ with zeros on both ends and builds the second band
+only for the strictly lower triangle ($j<t$) honours both conventions
+automatically. An off-by-one in this shift is silently masked by the
+test $\lambda_t\equiv 1$ (which zeroes $\beta$ identically) and must
+therefore be caught by an independent test with $\lambda_t \in (0,1)$.
+
+%% ================================================================
+\section{Self-Attention via Mamba-3}
+\label{sec:self}
+%% ================================================================
+
+We now instantiate the duality \eqref{eq:ssd-derived} as a concrete
+self-attention block for a single sequence
+$\bm{X}\in\mathbb{R}^{T\times D}$.
+
+\paragraph{Bridge from eq.~\eqref{eq:ssd-derived} to the attention form $\bm{Y} = (\bm{L}\odot\bm{C}\bm{B}^\top)\bm{V}$.}
+The SSD identity $\bm{Y} = (\bm{L}\odot\bm{C}\bm{B}^\top)\bm{X}$ was
+derived in \S\ref{sec:ssd} for the recurrence
+\eqref{eq:rec3}, in which the symbol $\bm{x}_t$ stands for
+\emph{whatever sequence is fed into the recurrence}. The symbol
+$\bm{X}$ in \eqref{eq:ssd-derived} is therefore a \emph{placeholder
+for the kernel's input matrix}, not a name reserved for the raw
+patch-embedding sequence. In a Mamba-3 \emph{attention} block the
+architectural choice is to feed not the raw token but the
+value-projected vector $\bm{v}_t = \mathrm{SiLU}(\bm{W}_V\bm{x}_t)$
+\eqref{eq:projV} into the recurrence:
+\begin{equation}\label{eq:ssd-bridge-rec}
+  \bm{h}_t \;=\; \alpha_t\bm{h}_{t-1} + \beta_t\bm{B}_{t-1}\bm{v}_{t-1}
+                                       + \gamma_t\bm{B}_t\bm{v}_t,
+  \qquad
+  \bm{y}_t \;=\; \bm{C}_t^\top\bm{h}_t.
+\end{equation}
+The unrolling of \S\ref{sec:ssd} did not depend on what the input is
+called — only that the recurrence has the shape \eqref{eq:rec3} — so
+\eqref{eq:ssd-bridge-rec} unrolls to exactly \eqref{eq:ssd-derived}
+with $\bm{X}$ replaced by $\bm{V}$:
+\begin{equation}\label{eq:self-bridge}
+  \boxed{\;\bm{Y}_{\text{self}} \;=\; \bigl(\bm{L}\odot\bm{C}\bm{B}^\top\bigr)\bm{V},\;}
+  \qquad
+  \bm{V} := (\bm{v}_1,\dots,\bm{v}_T)^\top\in\mathbb{R}^{T\times D}.
+\end{equation}
+This is the same identity \eqref{eq:ssd-derived}, applied to the
+specific input the block hands the kernel.
+
+Placing self-attention next to softmax attention:
+\[
+  \underbrace{\bm{Y} = \bigl(\bm{L}\odot\bm{C}\bm{B}^\top\bigr)\bm{V}}_{\text{Mamba SSD (2 or 3)}}
+  \qquad\Longleftrightarrow\qquad
+  \underbrace{\bm{Y} = \mathrm{softmax}\!\bigl(\bm{Q}\bm{K}^\top/\sqrt{d}\bigr)\bm{V}}_{\text{softmax attention}},
+\]
+the substitution
+\[
+  \bm{Q} \;\leftarrow\; \bm{C},\qquad
+  \bm{K} \;\leftarrow\; \bm{B},\qquad
+  \bm{V} \;\leftarrow\; \mathrm{SiLU}(\bm{W}_V\bm{x}),
+\]
+makes the analogy literal: the \emph{query} projection becomes
+$\bm{C}$ and the \emph{key} projection becomes $\bm{B}$; the value
+$\bm{V}$ is the same one softmax attention uses. The only
+structural difference is that row normalisation
+$\mathrm{softmax}(\cdot/\sqrt{d})$ has been replaced by an
+element-wise multiplication by the learned, structured mask $\bm{L}$.
+That is the whole operator: pick the right $\bm{Q}/\bm{K}/\bm{V}$,
+build $\bm{L}$ from the per-token scalars, multiply.
+
+\paragraph{The trapezoidal three-term form does not change this shape.}
+A reasonable worry: Mamba-3's three-term recurrence \eqref{eq:rec3}
+adds a $\beta_t$ band that mixes adjacent tokens, so does the output
+formula still factor as $\bm{Y} = (\bm{L}\odot\bm{C}\bm{B}^\top)\bm{V}$?
+It does — only the \emph{contents} of $\bm{L}$ change.
+\S\ref{sec:trap} derived this already: collecting coefficients of
+$\bm{B}_j\bm{x}_j$ in the unrolled three-term state gives
+\eqref{eq:L3},
+\[
+  L_{tj} = \Bigl(\prod_{k=j+1}^{t}\alpha_k\Bigr)\gamma_j
+  \;+\; \Bigl(\prod_{k=j+2}^{t}\alpha_k\Bigr)\beta_{j+1},
+\]
+i.e.\ \emph{two} contributions per $(t,j)$ cell instead of one. The
+Mamba-2 two-term mask \eqref{eq:L2} is exactly the special case
+$\beta\equiv 0$ (equivalently $\lambda_t\equiv 1$). Plugging this
+richer $L_{tj}$ into the same row formula \eqref{eq:rowform}
+reproduces $\bm{Y} = (\bm{L}\odot\bm{C}\bm{B}^\top)\bm{V}$ unchanged;
+only the mask gets an extra band. Consequence for an implementer:
+Mamba-3 self-attention reuses every line of code that handles
+Mamba-2 SSD, with the single change of swapping the mask builder
+from a two-term to a three-term constructor.
+
+\subsection{Per-token projections}
+
+For each $t\in\{1,\dots,T\}$ compute
+\begin{align}
+  \bm{B}_t &= \bm{W}_B\,\bm{x}_t        & &\text{(key)} \\
+  \bm{C}_t &= \bm{W}_C\,\bm{x}_t        & &\text{(query)} \\
+  \Delta_t &= \mathrm{Softplus}(\bm{w}_\Delta^\top\bm{x}_t) & &\text{(step size)}\\
+  A_t &= -\mathrm{Softplus}(\bm{w}_A^\top\bm{x}_t) \text{ or const.} & &\text{(decay)} \\
+  \lambda_t &= \sigma(\bm{w}_\lambda^\top\bm{x}_t)\in[0,1] & &\text{(trapezoidal weight)} \\
+  \bm{v}_t &= \mathrm{SiLU}(\bm{W}_V\,\bm{x}_t)         & &\text{(value)}
+\end{align}
+Form $\alpha_t,\beta_t,\gamma_t$ from \eqref{eq:abc}. Optionally apply
+\textbf{BCNorm} (RMSNorm on $\bm{B}_t,\bm{C}_t$; \cite{mamba3}
+\S 3.4) and learnable channel-wise biases $\bm{b}_B, \bm{b}_C$ before
+using them.
+
+\subsection{Self-attention output}
+
+Assemble $\bm{B},\bm{C}\in\mathbb{R}^{T\times N}$ and the
+value-projected matrix
+$\bm{V} = (\bm{v}_1,\dots,\bm{v}_T)^\top\in\mathbb{R}^{T\times D}$
+with rows $\bm{v}_t = \mathrm{SiLU}(\bm{W}_V\bm{x}_t)$
+\eqref{eq:projV}, and the mask
+$\bm{L}$ from \eqref{eq:L2} or \eqref{eq:L3}. The self-attention
+output is
+\begin{equation}\label{eq:self-out}
+  \bm{Y}_{\text{self}} \;=\; \bigl(\bm{L}\odot\bm{C}\bm{B}^\top\bigr)\bm{V},
+\end{equation}
+or, entrywise,
+\begin{equation}\label{eq:self-entry}
+  \bm{y}_i^{\text{self}} \;=\; \sum_{j=1}^{i} L_{ij}\,(\bm{C}_i^\top \bm{B}_j)\,\bm{v}_j.
+\end{equation}
+Because $L_{ij}=0$ for $j>i$, the attention is \emph{causal}: token
+$i$ sees tokens $1,\dots,i$. We remove this causality in
+Section~\ref{sec:images} by running a second pass in the reverse
+direction.
+
+\subsection{Complex-valued SSM / RoPE trick: attention with learned RoPE}
+\label{sec:rope}
+
+Mamba-3 promotes $\bm{A}$ from a real scalar to a block-diagonal
+matrix of $2{\times}2$ rotations
+\begin{equation}\label{eq:Rdef}
+  \bm{R}_t = \mathrm{Block}\bigl(\{R(\Delta_t\bm{\theta}_t[i])\}_{i=1}^{N/2}\bigr),
+  \qquad
+  R(\phi) = \begin{bmatrix}\cos\phi & -\sin\phi\\ \sin\phi & \cos\phi\end{bmatrix},
+\end{equation}
+and Proposition~4 of \cite{mamba3} shows that this is equivalent
+to applying data-dependent rotary embeddings to $\bm{B}$ and $\bm{C}$.
+Writing $\bm{R}_{\le t} := \prod_{i=0}^{t}\bm{R}_i^\top$, the complex
+recurrence is
+\begin{equation}\label{eq:complex-rec}
+  \bm{h}_t = \alpha_t\,\bm{h}_{t-1}
+            + \beta_t\,\bm{R}_{\le t-1}\,\bm{B}_{t-1}\,\bm{x}_{t-1}
+            + \gamma_t\,\bm{R}_{\le t}\,\bm{B}_{t}\,\bm{x}_{t},
+\qquad
+  \bm{y}_t = (\bm{R}_{\le t}\,\bm{C}_t)^\top\,\bm{h}_t.
+\end{equation}
+Following the same unrolling as in Section~\ref{sec:ssd}, the
+analogue of \eqref{eq:self-entry} becomes
+\begin{equation}\label{eq:self-rope}
+  \bm{y}_i^{\text{self}}
+     \;=\; \sum_{j=1}^{i} L_{ij}\,
+            \bigl(\widetilde{\bm{C}}_i^{\,\top}\widetilde{\bm{B}}_j\bigr)\,\bm{v}_j,
+  \qquad
+  \widetilde{\bm{C}}_i := \bm{R}_{\le i}\,\bm{C}_i,\quad
+  \widetilde{\bm{B}}_j := \bm{R}_{\le j}\,\bm{B}_j.
+\end{equation}
+That is, \textbf{Mamba-3 self-attention is linear attention with a
+structured mask $\bm{L}$ and a \emph{data-dependent} rotary embedding}
+applied to the $\bm{B}$ (key) and $\bm{C}$ (query) projections,
+exactly the Transformer's RoPE but with angles learned per token
+rather than fixed to $10000^{-2i/N}$.
+
+\subsection{MIMO extension}\label{sec:mimo}
+
+Mamba-3's MIMO variant (\cite{mamba3} \S 3.3, eqs.~(12)–(14))
+stacks $R$ parallel SSMs that share the scalar gates $\alpha_t,\Delta_t$
+but carry independent $\bm{B}_t^{(j)},\bm{C}_t^{(i)},\bm{x}_t^{(j)}$.
+The head-level output is
+\begin{equation}
+  \bm{y}_t^{(i)} \;=\; \sum_{j=0}^{R-1}\mathrm{SSM}\bigl(\alpha,\Delta,\bm{B}^{(j)},\bm{C}^{(i)},\bm{x}^{(j)}\bigr)_t,
+\end{equation}
+i.e.\ $R^2$ SISO calls in parallel. Using \eqref{eq:ssd-derived} on
+each, the MIMO self-attention output is
+\begin{equation}\label{eq:mimo-self}
+  \bm{Y}^{(i)} \;=\; \sum_{j=0}^{R-1}
+     \bigl(\bm{L}\odot \bm{C}^{(i)}\bm{B}^{(j)\top}\bigr)\bm{X}^{(j)},
+  \quad i=0,\dots,R-1.
+\end{equation}
+This is exactly multi-head linear attention with shared mask.
+
+\subsection{Worked example: self-attention on one $504\!\times\!504$ image}
+\label{sec:self-worked}
+
+To make the shapes concrete, apply \eqref{eq:self-out} to a single RGB
+image $\bm{I}\in\mathbb{R}^{504\times 504\times 3}$ with patch size
+$P=14$ and feature width $D=384$, split across $H=6$ heads
+($d_{\text{head}}=64$) with state dimension $N=64$. No special tokens,
+no multi-view assembly — just the operator on one image.
+
+\paragraph{From pixels to tokens.}
+The 504$\times$504 RGB image is sliced into non-overlapping
+$14\!\times\!14$ patches by a single strided convolution
+(\emph{patch embedding}), giving a $36\!\times\!36$ grid of
+patch-tokens. Each patch is then mapped to a $D$-dim feature vector
+by exactly the linear map of \eqref{eq:patch-embed}; we make every
+step concrete here.
+
+\medskip
+\noindent\emph{Step 1 — slice the image into patches.}
+Index the patch grid by $(r, c)$ with $r, c \in \{1, \dots, 36\}$.
+The $(r, c)$-th patch is the $14\!\times\!14\!\times\!3$ block
+\begin{equation}
+  \bm{P}_{r,c} \;\in\; \mathbb{R}^{14\times 14\times 3},
+  \qquad
+  \bm{P}_{r,c}[i, j, k] \;=\; \bm{I}\bigl[14(r{-}1){+}i,\; 14(c{-}1){+}j,\; k\bigr].
+\end{equation}
+Flatten its three colour planes into one vector (row-major over
+height, width, channel):
+\begin{equation}
+  \bm{p}_{r,c} \;:=\; \mathrm{vec}(\bm{P}_{r,c})
+   \;\in\; \mathbb{R}^{14 \cdot 14 \cdot 3} \;=\; \mathbb{R}^{588}.
+\end{equation}
+Each pixel of the patch contributes 3 scalars (one per RGB channel),
+so a patch is a $588$-dim vector of raw pixel intensities (typically
+each rescaled to $[0, 1]$ and then ImageNet-normalised).
+
+\medskip
+\noindent\emph{Step 2 — project each patch to a $D$-dim feature.}
+A single learned linear map (the patch-embedding weight) is shared
+across all $1296$ patches:
+\begin{equation}\label{eq:self-worked-embed}
+  \bm{x}_{r,c}
+   \;=\; \bm{W}_{\text{emb}}\,\bm{p}_{r,c} \;+\; \bm{b}_{\text{emb}}
+   \;\in\;\mathbb{R}^{D} = \mathbb{R}^{384},
+  \qquad
+  \bm{W}_{\text{emb}}\in\mathbb{R}^{384\times 588},
+  \quad
+  \bm{b}_{\text{emb}}\in\mathbb{R}^{384}.
+\end{equation}
+This is \eqref{eq:patch-embed} applied to our concrete numbers. Implemented as
+a $\mathrm{Conv2d}(3{\to}D, \text{kernel}{=}14, \text{stride}{=}14)$
+on the image, it does the slice and the linear map in one pass —
+mathematically identical to the per-patch formula above. The total
+parameter count of this layer is $D \cdot 14\!\cdot\!14\!\cdot\!3 + D
+= 384 \cdot 588 + 384 = 226\,176$ weights, shared across every patch
+position; learning adjusts $\bm{W}_{\text{emb}}$ so that the
+$D$-dim output discriminates whatever the downstream loss requires
+(class identity, depth, semantic mask, etc.).
+
+\medskip
+\noindent\emph{Step 3 — flatten the patch grid to a token sequence.}
+Read the $36\!\times\!36$ grid in row-major order to produce a length-$T$
+sequence:
+\begin{equation}
+  \bm{x}_t \;:=\; \bm{x}_{r,c},\quad t \;=\; 36(r{-}1) + c,\quad t = 1, \dots, T,
+  \qquad
+  T = 36 \cdot 36 = 1296.
+\end{equation}
+Stacking the $T$ rows gives the token matrix consumed by the
+attention layer:
+\begin{equation}
+  \bm{X}\;=\;(\bm{x}_1, \dots, \bm{x}_T)^\top
+   \;\in\; \mathbb{R}^{T \times D} \;=\; \mathbb{R}^{1296 \times 384}.
+\end{equation}
+The attention layer never sees pixels — it sees these $1296$ token
+vectors, each of dimension $D = 384$. Every subsequent
+operation in this worked example (projections to $\bm{B}, \bm{C},
+\bm{V}$, the masked inner product, etc.) treats $\bm{X}$ as its
+input matrix, with no further reference to the original
+$504\!\times\!504$ pixel grid.
+
+\paragraph{What the layer computes.}
+The per-token projections \eqref{eq:projB}, \eqref{eq:projC},
+\eqref{eq:projV}, \eqref{eq:projA} produce
+\begin{equation}
+  \bm{B},\bm{C}\in\mathbb{R}^{T\times N}=\mathbb{R}^{1296\times 64},
+  \quad
+  \bm{V}\in\mathbb{R}^{T\times D}=\mathbb{R}^{1296\times 384},
+  \quad
+  \bm{L}\in\mathbb{R}^{T\times T}=\mathbb{R}^{1296\times 1296},
+\end{equation}
+where $\bm{V} = (\bm{v}_1,\dots,\bm{v}_T)^\top$ collects the
+value-projected rows $\bm{v}_t = \mathrm{SiLU}(\bm{W}_V\bm{x}_t)$.
+The output is
+\begin{equation}
+  \bm{Y}_{\text{self}}
+   \;=\; \bigl(\bm{L}\odot\bm{C}\bm{B}^\top\bigr)\bm{V}
+   \;\in\;\mathbb{R}^{T\times D}=\mathbb{R}^{1296\times 384}.
+\end{equation}
+\emph{Output shape equals input shape}: every patch still has a single
+$D$-dimensional feature; only its content has been re-mixed across the
+1296 tokens, weighted by the structured mask $\bm{L}$.
+
+\paragraph{Cost in this configuration.}
+Materializing the masked inner products costs $O(T^{2}N) =
+1296^{2}\cdot 64 \approx 1.07\!\times\!10^{8}$ multiply-adds per head;
+the value mixing then costs $O(T^{2}d_{\text{head}}) =
+1296^{2}\cdot 64 \approx 1.07\!\times\!10^{8}$ per head. The $T\times
+T$ tensor itself is $1296^{2}\approx 1.68\!\times\!10^{6}$ scalars
+($\sim$\,6.7\,MiB at fp32 per head), which is the term that scales
+quadratically with image side.
+
+\paragraph{Causality on a 2-D grid.}
+$\bm{L}_{ij}=0$ for $j>i$ in \eqref{eq:L2}/\eqref{eq:L3}: a patch in
+the top-right of the grid never reads from the bottom-left. To use
+this operator as a usable image self-attention, run it on the forward
+and reverse permutations and sum, as in
+\eqref{eq:bidi2}/\eqref{eq:bidi4}; that is what
+Section~\ref{sec:bidi} adds.
+
+%% ================================================================
+\section{Cross-Attention via Mamba-3}
+\label{sec:cross}
+%% ================================================================
+
+For cross-attention we have two token sequences: a \emph{query}
+sequence $\bm{X}^{q}\in\mathbb{R}^{T_q\times D}$ and a \emph{key/value}
+(context) sequence $\bm{X}^{kv}\in\mathbb{R}^{T_{kv}\times D}$.
+
+\paragraph{Why cross-attention needs no new derivation.}
+Cross-attention reuses the same identity, just with two different
+sequences feeding the two sides instead of one. Place the two
+formulas side by side:
+\[
+  \underbrace{\bm{Y} = \bigl(\bm{L}^{\text{cross}}\odot\bm{C}^q\bm{B}^{kv\top}\bigr)\bm{V}^{kv}}_{\text{Mamba-3 cross-SSD}}
+  \qquad\Longleftrightarrow\qquad
+  \underbrace{\bm{Y} = \mathrm{softmax}\!\bigl(\bm{Q}\bm{K}^\top/\sqrt{d}\bigr)\bm{V}}_{\text{softmax cross-attention}},
+\]
+with the substitution
+\[
+  \bm{Q} \;\leftarrow\; \bm{C}^q, \quad
+  \bm{K} \;\leftarrow\; \bm{B}^{kv}, \quad
+  \bm{V} \;\leftarrow\; \bm{V}^{kv} \;=\; \mathrm{SiLU}(\bm{W}_V \bm{x}^{kv}).
+\]
+The cross-attention output equation arises from
+\eqref{eq:ssd-derived} by the same bridge as
+\eqref{eq:self-bridge}: the input to the SSD kernel is the kv-side
+value matrix
+$\bm{V}^{kv}\in\mathbb{R}^{T_{kv}\times D}$, so the placeholder
+$\bm{X}$ in \eqref{eq:ssd-derived} is filled by $\bm{V}^{kv}$.
+The reading rule: the \emph{query} projection comes from the
+query-side tokens $\bm{x}^{q}$, while \emph{both} the key and the
+value projections come from the kv-side tokens $\bm{x}^{kv}$.
+Nothing about the operator changes — only which sequence each
+projection reads from.
+
+\paragraph{Two things that do change relative to self-attention.}
+First, the mask $\bm{L}^{\text{cross}}$ \eqref{eq:Lcross} is
+rectangular ($T_q \times T_{kv}$) rather than triangular, because
+queries and keys live on different time axes and there is no notion
+of one token coming "before" another across the two streams.
+Second, the trapezoidal structure of \eqref{eq:L3} carries over to
+the kv axis when the kv side is itself produced by a Mamba-3
+recurrence (the typical case in Variant~B, \S\ref{sec:crossB}): each
+column of $\bm{L}^{\text{cross}}$ then has the same two-band decay
+profile as a self-SSD row, with the recency bias discussed in
+\S\ref{sec:crossB}. The output formula $\bm{Y} =
+(\bm{L}^{\text{cross}}\odot\bm{C}^q\bm{B}^{kv\top})\bm{V}^{kv}$ is
+\emph{unchanged}; only the geometry of $\bm{L}$ and which tokens
+supply $\bm{C}, \bm{B}, \bm{V}$ are different. Consequence for an
+implementer: cross-attention reuses every line of code that handles
+self-SSD, with two changes — feed $\bm{C}$ from the query sequence
+and $\bm{B}, \bm{V}$ from the kv sequence, and swap the
+triangular mask builder for the rectangular \texttt{cross} mask.
+
+\subsection{Projections for the two sides}
+
+Query side:
+\begin{equation}\label{eq:cross-proj-q}
+  \bm{C}_i^{q} = \bm{W}_C\,\bm{x}_i^{q},
+  \quad i=1,\dots,T_q,
+\end{equation}
+that is, only the \emph{query} projection is taken from the query
+side. Key/value side:
+\begin{align}
+  \bm{B}_j^{kv} &= \bm{W}_B\,\bm{x}_j^{kv}, \\
+  \Delta_j^{kv} &= \mathrm{Softplus}(\bm{w}_\Delta^\top \bm{x}_j^{kv}), \\
+  A_j^{kv}      &= -\mathrm{Softplus}(\bm{w}_A^\top \bm{x}_j^{kv})\;\text{or const.}, \\
+  \bm{v}_j^{kv} &= \mathrm{SiLU}(\bm{W}_V\,\bm{x}_j^{kv}),
+  \quad j=1,\dots,T_{kv}.
+\end{align}
+Decay scalars $\alpha_j^{kv}$ etc.\ are computed as in \eqref{eq:abc}
+but using the $kv$-side $\Delta_j^{kv}, A_j^{kv}$.
+
+\subsection{Variant A: state-compressed cross-attention (constant memory)}
+\label{sec:crossA}
+
+Run the Mamba-3 recurrence \eqref{eq:rec2} on the $kv$-side with
+\emph{outer-product} accumulation, treating $\bm{v}_j^{kv}$ as the
+input instead of $\bm{x}_j^{kv}$. Define a matrix-valued hidden state
+$\bm{H}_j \in \mathbb{R}^{N\times D}$ by
+\begin{equation}\label{eq:Hrec}
+  \bm{H}_j \;=\; \alpha_j^{kv}\,\bm{H}_{j-1}
+                + \gamma_j^{kv}\,\bm{B}_j^{kv}\,\bm{v}_j^{kv\,\top},
+  \qquad \bm{H}_0 = \bm{0}.
+\end{equation}
+By the exact same unrolling as in \eqref{eq:un-claim} we obtain
+\begin{equation}\label{eq:Hclose}
+  \bm{H}_{T_{kv}} \;=\; \sum_{j=1}^{T_{kv}}
+      \Bigl(\prod_{k=j+1}^{T_{kv}}\alpha_k^{kv}\Bigr)
+      \gamma_j^{kv}\,\bm{B}_j^{kv}\,\bm{v}_j^{kv\,\top}
+  \;=:\; \bm{h}_{\text{ref}} \in \mathbb{R}^{N\times D}.
+\end{equation}
+This $\bm{h}_{\text{ref}}$ is the \emph{compressed context}: it
+condenses the entire $kv$-sequence into a single $N\times D$ matrix.
+For each query $\bm{C}_i^q$, the output is obtained by a single
+left-multiplication:
+\begin{equation}\label{eq:crossA-out}
+  \boxed{\;\bm{y}_i^{\text{cross-A}} \;=\; \bm{C}_i^{q\,\top}\,\bm{h}_{\text{ref}} \;\in \mathbb{R}^{D}.\;}
+\end{equation}
+Shape check: $\bm{C}_i^{q\,\top}\in\mathbb{R}^{1\times N}$ times
+$\bm{h}_{\text{ref}}\in\mathbb{R}^{N\times D}$ gives
+$\mathbb{R}^{1\times D}$, i.e.\ a $D$-vector.
+
+\textbf{Cost.} Once $\bm{h}_{\text{ref}}$ is built in $O(T_{kv}ND)$
+time, answering all $T_q$ queries costs $O(T_q ND)$. Memory for the
+``KV cache'' is constant in $T_{kv}$ (it is exactly
+$\bm{h}_{\text{ref}}\in\mathbb{R}^{N\times D}$). This is the
+analogue of the recurrent KV cache.
+
+\subsection{Variant B: token-level cross-attention (exact SSD)}
+\label{sec:crossB}
+
+To allow every query token to see every $kv$ token independently,
+keep the full similarity matrix. Build an $T_q\times T_{kv}$ mask
+\begin{equation}\label{eq:Lcross}
+  L^{\text{cross}}_{ij} \;=\; \gamma_j^{kv}\,
+        \Bigl(\prod_{k=j+1}^{T_{kv}}\alpha_k^{kv}\Bigr),
+\end{equation}
+whose $j$-th column is the same decay profile as in \eqref{eq:L2}, but
+now the matrix is \emph{not triangular} because queries do not live on
+the same time axis as keys. The cross-attention output is
+\begin{equation}\label{eq:crossB-out}
+  \boxed{\;\bm{Y}^{\text{cross-B}} \;=\; \bigl(\bm{L}^{\text{cross}}\odot\bm{C}^{q}\bm{B}^{kv\,\top}\bigr)\bm{V}^{kv},\;}
+\end{equation}
+or, entrywise,
+\begin{equation}\label{eq:crossB-entry}
+  \bm{y}_i^{\text{cross-B}} \;=\; \sum_{j=1}^{T_{kv}} L^{\text{cross}}_{ij}\,
+           \bigl(\bm{C}_i^{q\,\top}\bm{B}_j^{kv}\bigr)\,\bm{v}_j^{kv}.
+\end{equation}
+Compare with softmax cross-attention
+$\bm{Y} = \mathrm{softmax}(\bm{C}^q\bm{B}^{kv\,\top})\,\bm{V}^{kv}$:
+\eqref{eq:crossB-out} replaces softmax row normalization with an
+elementwise, structured, learned mask. With the trivial mask
+$L^{\text{cross}}_{ij}\equiv 1$ we obtain ordinary linear cross-
+attention $\bm{C}^q\bm{B}^{kv\,\top}\bm{V}^{kv}$.
+
+\paragraph{End-of-sequence bias in $\bm{L}^{\text{cross}}$.} Note that
+\eqref{eq:Lcross} does not depend on $i$: every query row is the same
+column-decay profile. Concretely, $L^{\text{cross}}_{i,T_{kv}}=\gamma_{T_{kv}}$
+while $L^{\text{cross}}_{i,1}=\gamma_1\prod_{k=2}^{T_{kv}}\alpha_k$ is
+exponentially small once $T_{kv}$ is large. This encodes a strong
+\emph{recency bias toward the end of the $kv$ sequence}: every query
+already prefers the last $kv$ tokens before any data-dependent
+similarity $\bm{C}^q_i{}^\top\bm{B}^{kv}_j$ is applied. This is the
+right inductive bias when the $kv$ sequence has a natural causal order
+(decoder-style cross-attention), but it is arbitrary when the $kv$
+sequence is a permutation-invariant set — most notably, when it comes
+from an image patch grid. The bias becomes the order chosen by the
+raster scan.
+
+\paragraph{Bidirectional cross-attention for permutation-invariant $kv$.}
+When the $kv$ stream has no preferred order, replace
+$\bm{L}^{\text{cross}}$ by the symmetrised mask
+\begin{equation}\label{eq:Lcross-bi}
+  L^{\text{cross},\leftrightarrow}_{ij}
+     \;=\; \gamma_j\Bigl[\prod_{k=j+1}^{T_{kv}}\alpha_k
+                         \;+\; \prod_{k=1}^{j-1}\alpha_k\Bigr],
+\end{equation}
+which is obtained by summing \eqref{eq:Lcross} with its reverse-order
+counterpart, analogously to \eqref{eq:bidi2}. The two products coincide
+at the centre of the $kv$ sequence and decay symmetrically toward both
+endpoints, eliminating the raster-order preference while preserving the
+linear-complexity structure. For images this is the natural cross-
+attention mask to pair with the bidirectional self-attention of
+Section~\ref{sec:bidi}.
+
+\subsection{Which variant to use}
+
+\begin{center}
+\begin{tabular}{|l|l|l|}
+\hline
+ & \textbf{Variant A} (state-compressed) & \textbf{Variant B} (token-level)\\ \hline
+State size        & $\mathcal{O}(ND)$             & $\mathcal{O}(T_q T_{kv})$ (or streamed) \\ \hline
+Compute          & $\mathcal{O}((T_{kv}+T_q)ND)$ & $\mathcal{O}(T_q T_{kv}(N+D))$ \\ \hline
+Query adaptivity & Only via $\bm{C}_i^q$         & Via full $\bm{C}_i^{q\top}\bm{B}_j^{kv}$ \\ \hline
+Typical use      & Long context / large $T_{kv}$ & Short cross-attention / ablations \\ \hline
+\end{tabular}
+\end{center}
+
+Both variants can be augmented with the RoPE trick of
+\S\ref{sec:rope}: apply the rotation $\bm{R}_{\le i}^{(q)}$ to each
+query $\bm{C}_i^q$ and $\bm{R}_{\le j}^{(kv)}$ to each key
+$\bm{B}_j^{kv}$ before the inner product. This injects relative
+positional information into cross-attention.
+
+\subsection{Worked example: cross-attention between two $504\!\times\!504$ images}
+\label{sec:cross-worked}
+
+Two RGB images $\bm{I}^q,\bm{I}^{kv}\in\mathbb{R}^{504\times 504\times 3}$
+go through the same patch embedding \eqref{eq:patch-embed} independently,
+giving two token sequences
+\begin{equation}
+  \bm{X}^{q}\in\mathbb{R}^{T_q\times D}=\mathbb{R}^{1296\times 384},
+  \qquad
+  \bm{X}^{kv}\in\mathbb{R}^{T_{kv}\times D}=\mathbb{R}^{1296\times 384}.
+\end{equation}
+The per-token projections \eqref{eq:cross-proj-q} produce a query
+$\bm{C}^q\in\mathbb{R}^{T_q\times N}$ for the first image and a key /
+value pair $\bm{B}^{kv}\in\mathbb{R}^{T_{kv}\times N}$,
+$\bm{X}^{kv}\in\mathbb{R}^{T_{kv}\times D}$ for the second (with
+$N=64$, $D=384$, $H=6$, $d_{\text{head}}=64$ as before).
+
+\paragraph{Variant A: state-compressed.}
+Equation~\eqref{eq:crossA-out} collapses the
+second image into a single rank-$N$ summary and reads it out per
+query token of the first:
+\begin{align}
+  \bm{H} &= (\bm{B}^{kv})^\top \bm{X}^{kv}
+        \;\in\;\mathbb{R}^{N\times D} = \mathbb{R}^{64\times 384}, \\
+  \bm{Y}^q &= \bm{C}^q\,\bm{H}
+        \;\in\;\mathbb{R}^{T_q\times D} = \mathbb{R}^{1296\times 384}.
+\end{align}
+The summary $\bm{H}$ has $N\!\cdot\!D = 24\,576$ scalars
+\emph{independent of how big the second image is}. Doubling
+$\bm{I}^{kv}$'s resolution from $504^{2}$ to $1008^{2}$ ($T_{kv}\!=\!5184$)
+leaves $\bm{H}$'s shape untouched — only the one-time accumulation cost
+grows linearly. The output for the first image keeps its
+$\bm{X}^{q}$-shape: 1296 patches, 384 features each.
+
+\paragraph{Variant B: token-level.}
+Equation~\eqref{eq:crossB-out} keeps the full $T_q\!\times\!T_{kv}$
+inner-product matrix:
+\begin{equation}
+  \bm{Y}^q_{i}
+   \;=\; \sum_{j=1}^{T_{kv}} M_{ij}\,(\bm{C}_i^{q\top}\bm{B}_j^{kv})\,\bm{X}_j^{kv}
+   \quad\Rightarrow\quad
+   \bm{Y}^q\in\mathbb{R}^{1296\times 384},
+\end{equation}
+with intermediate weight tensor of size
+$1296\!\times\!1296\approx 1.68\!\times\!10^{6}$ scalars (the same
+quadratic memory term that appears in self-attention). Variant~A
+trades this off for a one-shot rank-$N$ bottleneck; Variant~B keeps
+per-pair adaptivity.
+
+\paragraph{What the output represents.}
+In both variants the output $\bm{Y}^q$ is shape-aligned with
+$\bm{X}^{q}$: \emph{one $D$-dimensional vector per patch of the first
+image}, now informed by the content of the second image. Each
+output patch is the same image-1 grid location it started in — only
+its features have been updated by information drawn from image~2.
+Image~2's grid never appears in $\bm{Y}^q$; if you also want
+image~2 informed by image~1, run the operator a second time with the
+roles of $(q, kv)$ swapped.
+
+%% ================================================================
+\section{Applying Mamba-3 to Images}
+\label{sec:images}
+%% ================================================================
+
+We now assemble the self- and cross-attention blocks into an image
+model.
+
+\subsection{Patchification}
+
+Given an image $\bm{I}\in\mathbb{R}^{H\times W\times 3}$, choose a
+patch size $P$ and define $L = (H/P)(W/P)$ patches
+$\bm{p}_{r,c}\in\mathbb{R}^{3P^2}$ for
+$r\in\{1,\dots,H/P\},\,c\in\{1,\dots,W/P\}$. Project with a shared
+linear map:
+\begin{equation}\label{eq:patch-embed}
+  \bm{x}_{r,c} \;=\; \bm{W}_{\text{emb}}\,\bm{p}_{r,c} + \bm{b}_{\text{emb}},
+  \qquad \bm{W}_{\text{emb}}\in\mathbb{R}^{D\times 3P^2}.
+\end{equation}
+Flattening in row-major order gives a token sequence
+$\bm{x}_1,\dots,\bm{x}_L$. The same block works for $N_v$ views
+stacked as $N_v L$ tokens.
+
+\subsection{Why a plain causal scan fails on images}
+
+Applying \eqref{eq:self-entry} directly to the flattened sequence
+gives
+\begin{equation}
+  \bm{y}_i^{\text{self}} = \sum_{j=1}^{i} L_{ij}\,(\bm{C}_i^\top\bm{B}_j)\,\bm{v}_j,
+\end{equation}
+i.e.\ each patch only sees patches \emph{earlier in raster order}.
+A patch at the top-right thus never reads from the bottom-left — half
+the image is missing. An image has no natural causal direction, so
+this asymmetry is harmful.
+
+\subsection{Bidirectional and multi-direction scans}
+\label{sec:bidi}
+
+Fix a permutation $\pi$ of $\{1,\dots,L\}$. Let
+$\mathrm{SSD}_\pi(\bm{X})$ mean: permute rows by $\pi$, apply
+\eqref{eq:ssd-derived}, permute back. Because SSD's only source of
+order is the mask $\bm{L}$, every permutation gives a different,
+still-valid SSM scan.
+
+\paragraph{Two-direction (forward + reverse).} With the identity
+permutation $\pi_\to$ and its reverse $\pi_\leftarrow$,
+\begin{equation}\label{eq:bidi2}
+  \bm{Y}^{\text{bi}}
+   \;=\; \mathrm{SSD}_{\pi_\to}(\bm{X}) + \mathrm{SSD}_{\pi_\leftarrow}(\bm{X}).
+\end{equation}
+Unrolling: for any pair $(i,j)$, either $j\le i$ (covered by the
+forward pass) or $j>i$ (covered by the reverse pass), so every pair
+of tokens contributes exactly once, with a mask value depending on
+$|i-j|$ rather than on the sign of $i-j$. This turns causal SSD into
+bidirectional linear attention on the raster order, matching the
+bidirectional Mamba variants used in the literature.
+
+\paragraph{Four-direction (raster + reverse + column-major + reverse).}
+For 2-D structure, also scan along columns. Let $\pi^\downarrow$ scan
+column-by-column top-to-bottom and $\pi^\uparrow$ its reverse. Then
+\begin{equation}\label{eq:bidi4}
+  \bm{Y}^{\text{4-dir}}
+   = \mathrm{SSD}_{\pi_\to}(\bm{X}) + \mathrm{SSD}_{\pi_\leftarrow}(\bm{X})
+   + \mathrm{SSD}_{\pi^\downarrow}(\bm{X}) + \mathrm{SSD}_{\pi^\uparrow}(\bm{X}).
+\end{equation}
+Each summand uses the same learned weights; only the token order
+changes, so \eqref{eq:bidi4} adds no parameters. This mirrors the
+four scans of Vision-Mamba / V-Mamba realized under the Mamba-3 SSD
+kernel.
+
+\paragraph{Equivalence to a symmetric mask.} Writing
+\eqref{eq:bidi2} entrywise,
+\begin{equation}\label{eq:bidi-sym}
+  \bm{y}_i^{\text{bi}} = \sum_{j=1}^{L} \widetilde{L}_{ij}\,
+       (\bm{C}_i^\top\bm{B}_j)\,\bm{v}_j,
+  \quad
+  \widetilde{L}_{ij} = L_{ij}^{\to} + L_{ij}^{\leftarrow},
+\end{equation}
+where $L^\to$ is \eqref{eq:L2} and $L^\leftarrow$ is the same matrix
+built on the reversed sequence. $\widetilde{L}$ is \emph{symmetric} in
+$i,j$: the forward pass covers $j\le i$, the reverse pass covers
+$j\ge i$, and with the diagonal counted twice the bidirectional
+self-attention has no preferred direction.
+
+\subsection{2-D positional encoding via the complex SSM}
+\label{sec:rope2d}
+
+To encode row and column positions, use the RoPE trick of
+\S\ref{sec:rope} with a \emph{factored} angle schedule. For the
+$n$-th channel of the state, split into independent row and column
+angles
+\begin{equation}\label{eq:rope2d}
+  \theta_{r,c}[n] = \theta^{\text{row}}[n]\cdot r + \theta^{\text{col}}[n]\cdot c,
+  \qquad n = 1,\dots,N/2,
+\end{equation}
+where $\theta^{\text{row}},\theta^{\text{col}}$ are learned or fixed
+frequency vectors. Replace $\bm{\theta}_t$ in \eqref{eq:Rdef} by
+$\theta_{r,c}$ for the patch at $(r,c)$. The resulting
+$\widetilde{\bm{C}}_i = \bm{R}_{\le i}\bm{C}_i$ and
+$\widetilde{\bm{B}}_j$ now carry a 2-D rotary position encoding
+inside the SSD inner product \eqref{eq:self-rope}.
+
+\subsection{Image self-attention layer}
+
+Putting the pieces together, one Mamba-3 self-attention layer for
+images is:
+
+\medskip
+\noindent\textbf{Algorithm (Mamba-3 image self-attention layer).}
+\begin{enumerate}
+  \item Input tokens $\bm{X}\in\mathbb{R}^{L\times D}$ for one image
+        (already patch-embedded).
+  \item Compute per-token $\bm{B}_t,\bm{C}_t,\Delta_t,A_t,\lambda_t,\bm{v}_t$
+        via \eqref{eq:projB}–\eqref{eq:projV}.
+  \item Apply BCNorm and add learnable biases $\bm{b}_B,\bm{b}_C$
+        (\cite{mamba3}~\S 3.4).
+  \item Apply 2-D RoPE: $\bm{B}_t\leftarrow \bm{R}_{\le t}\bm{B}_t$,
+        $\bm{C}_t\leftarrow \bm{R}_{\le t}\bm{C}_t$
+        with $\bm{R}$ from \eqref{eq:rope2d}.
+  \item Build masks $\bm{L}^{\to},\bm{L}^{\leftarrow}$ from
+        \eqref{eq:L2} (or \eqref{eq:L3} for the trapezoidal
+        variant) using $\alpha_t,\beta_t,\gamma_t$.
+  \item Compute $\bm{Y}^\to = (\bm{L}^\to\odot\bm{C}\bm{B}^\top)\bm{V}$
+        and $\bm{Y}^\leftarrow$ on the reversed order; optionally
+        also $\bm{Y}^\downarrow,\bm{Y}^\uparrow$.
+  \item Sum across scans to get
+        $\bm{Y}^{\text{self}}\in\mathbb{R}^{L\times D}$.
+  \item Apply the usual post-processing (output projection +
+        SwiGLU MLP block + residual), exactly as in a Mamba-3 /
+        Llama block (\cite{mamba3}~Fig.~2).
+\end{enumerate}
+
+\subsection{Multi-view cross-attention for 3-D applications}
+\label{sec:multiview}
+
+For multi-view inputs (e.g.\ \cite{depthanything3}, Fig.~2),
+stack the tokens of $N_v$ views into
+$\bm{X}\in\mathbb{R}^{N_v L \times D}$. Let $V(i)\in\{1,\dots,N_v\}$
+denote the view index of token $i$.
+
+\paragraph{Within-view layer.} Apply the self-attention layer of the
+previous subsection \emph{per view}: i.e.\ the mask is
+$L_{ij}^{\text{in}} = L_{ij}\cdot\mathbb{I}[V(i)=V(j)]$, so tokens
+only interact inside their own view. This is block-diagonal
+bidirectional SSD.
+
+\paragraph{Cross-view layer.} Treat one view at a time as the
+\emph{query} side and all other views as the \emph{key/value} side.
+Build
+\begin{equation}\label{eq:Lxview}
+  L_{ij}^{\text{cv}}
+    \;=\; L^{\text{cross}}_{ij}\cdot \mathbb{I}[V(i)\neq V(j)],
+\end{equation}
+with $L^{\text{cross}}$ from \eqref{eq:Lcross} (where the ``time'' axis
+is a learned ordering of views, e.g.\ a canonical ``reference view
+first'' order). The output is
+\begin{equation}\label{eq:cvout}
+  \bm{Y}^{\text{cv}} \;=\; \bigl(\bm{L}^{\text{cv}}\odot\bm{C}\bm{B}^\top\bigr)\bm{V}.
+\end{equation}
+Alternating within-view and cross-view layers realizes the same
+design as \cite{depthanything3} Fig.~2 (``within-view
+self-attention'' and ``cross-view self-attention''), but with softmax
+attention replaced by the Mamba-3 SSD kernel, inheriting its linear
+complexity in the token count.
+
+\paragraph{Two-view cross-attention (asymmetric).} For the special
+case of a query image and a reference image, use Variant~A of
+Section~\ref{sec:crossA}: build
+$\bm{h}_{\text{ref}}\in\mathbb{R}^{N\times D}$ from the reference
+tokens once, and answer each query token in $O(ND)$. This is the
+natural ``Mamba-3 cross-attention'' block when the reference view is
+much larger than the query view, or is reused across many queries
+(e.g.\ a novel-view-synthesis decoder reading from a shared scene
+encoding).
+
+%% ================================================================
+\section{Non-Causal SSD and the VSSD Image Model}
+\label{sec:ncssd}
+%% ================================================================
+
+The bidirectional and multi-direction scans of \S\ref{sec:bidi}
+remove causality by \emph{repeating} the SSD kernel along several
+permutations of the token order. \cite{vssd} (VSSD, ICCV~2025)
+proposes an alternative that removes causality \emph{at the algebraic
+level}, so a single forward pass already yields a non-causal,
+position-independent operator. We derive their construction from the
+two-term recurrence \eqref{eq:rec2} using only the algebra of
+Section~\ref{sec:ssd}, then describe the resulting image block.
+
+\subsection{The reinterpretation of $A_t$}
+
+Recall \eqref{eq:rec2}, $\bm{h}_t = \alpha_t\,\bm{h}_{t-1}
++ \gamma_t\,\bm{B}_t\bm{x}_t$ with $\alpha_t = e^{\Delta_t A_t}\in
+(0,1)$ controlling \emph{how much of the previous state is retained}.
+\cite{vssd} observe that in the SSD form, $A_t$ is a learned,
+data-dependent scalar with no a priori meaning: one is equally free to
+make it modulate the \emph{current} contribution instead. Concretely,
+fix the previous-state multiplier to $1$ and divide the input weight
+by $A_t$:
+\begin{equation}\label{eq:nc-rec}
+  \bm{h}_t \;=\; \bm{h}_{t-1} \;+\; \tfrac{1}{A_t}\,\bm{B}_t\bm{x}_t,
+  \qquad \bm{h}_0 = \bm{0},
+\end{equation}
+which is \cite{vssd}~eq.~(7). Unrolling \eqref{eq:nc-rec} with
+$\bm{h}_0=\bm{0}$,
+\begin{equation}\label{eq:nc-unroll}
+  \bm{h}_t \;=\; \sum_{i=1}^{t} \tfrac{1}{A_i}\,\bm{B}_i\bm{x}_i.
+\end{equation}
+Compared with \eqref{eq:un-claim}, the multiplicative decay
+$\prod_{k=j+1}^{t}\alpha_k$ has been replaced by a flat $1$: a token's
+contribution to the state no longer depends on \emph{when} it
+arrives, only on its own coefficient $1/A_i$. The mechanism is now
+\emph{self-referential}: each token decides its own weight.
+
+\subsection{Bidirectional NC-SSD collapses to a global hidden state}
+
+The recurrence \eqref{eq:nc-unroll} is still causal in the sense that
+$\bm{h}_t$ sums only over $i\le t$. Run it once forward and once
+backward and sum, exactly as in \eqref{eq:bidi2}, defining
+$\bm{Z}_j := \bm{B}_j\bm{x}_j^\top \in \mathbb{R}^{N\times D}$ (the
+outer product appearing in \eqref{eq:Hrec}):
+\begin{align}
+  \bm{H}_i^{\,\to}        &= \sum_{j=1}^{i}\tfrac{1}{A_j}\bm{Z}_j, \\
+  \bm{H}_i^{\,\leftarrow} &= \sum_{j=i}^{L}\tfrac{1}{A_j}\bm{Z}_j, \\
+  \bm{H}_i^{\,\text{bi}}  &= \bm{H}_i^{\,\to} + \bm{H}_i^{\,\leftarrow} - \tfrac{1}{A_i}\bm{Z}_i
+                          \;=\; \sum_{j=1}^{L}\tfrac{1}{A_j}\bm{Z}_j. \label{eq:nc-bi}
+\end{align}
+The $-\tfrac{1}{A_i}\bm{Z}_i$ correction removes the double counting
+of $j=i$. The last equality is the key observation of
+\cite{vssd}: the bidirectional NC-SSD hidden state is
+\emph{independent of $i$}. Writing
+\begin{equation}\label{eq:nc-H}
+  \bm{H} \;:=\; \sum_{j=1}^{L}\tfrac{1}{A_j}\bm{Z}_j
+       \;=\; \sum_{j=1}^{L}\tfrac{1}{A_j}\,\bm{B}_j\,\bm{x}_j^\top
+       \;\in\;\mathbb{R}^{N\times D},
+\end{equation}
+every output token reads from the \emph{same} compressed context
+$\bm{H}$. \cite{vssd}~eq.~(8) further notes that the self-term
+$\tfrac{1}{A_i}\bm{Z}_i$ is redundant with the block's skip
+connection, so in practice one keeps the simpler global form
+\eqref{eq:nc-H} and skips the correction.
+
+\subsection{Closed form: $\bm{Y} = \bm{C}\bigl((\bm{B}\odot\bm{m})^\top\bm{X}\bigr)$}
+
+Let $\bm{m}\in\mathbb{R}^{L}$ with $m_j := 1/A_j$, and write $\bm{B}\odot\bm{m}$
+for the matrix whose $j$-th row is $m_j\,\bm{B}_j$ (i.e.\ $\bm{m}$
+broadcast along the $N$-axis). The output equation
+$\bm{y}_t = \bm{C}_t^\top\bm{H}$ stacks to
+\begin{equation}\label{eq:nc-Y}
+  \boxed{\;\bm{Y} \;=\; \bm{C}\,\bm{H} \;=\; \bm{C}\bigl((\bm{B}\odot\bm{m})^\top\bm{X}\bigr),\;}
+\end{equation}
+which is \cite{vssd}~eq.~(10). Shape check:
+$(\bm{B}\odot\bm{m})^\top\in\mathbb{R}^{N\times L}$, $\bm{X}\in
+\mathbb{R}^{L\times D}$, product is $\mathbb{R}^{N\times D}$, and
+$\bm{C}\in\mathbb{R}^{L\times N}$ times that is
+$\mathbb{R}^{L\times D}$, as required.
+
+Comparing \eqref{eq:nc-Y} with the SSD identity
+\eqref{eq:ssd-derived},
+\begin{equation}
+  \bm{Y}_{\text{SSD}} \;=\; \bigl(\bm{L}\odot\bm{C}\bm{B}^\top\bigr)\bm{X},
+  \qquad
+  \bm{Y}_{\text{NC-SSD}} \;=\; \bm{C}\bigl((\bm{B}\odot\bm{m})^\top\bm{X}\bigr),
+\end{equation}
+the $T\times T$ structured mask $\bm{L}$ has been replaced by a
+$T$-vector $\bm{m}$ that column-scales $\bm{B}$. The two operations
+are no longer of the same shape:
+\begin{itemize}
+  \item SSD pays $O(T^2 N)$ to form $\bm{L}\odot\bm{C}\bm{B}^\top$,
+        then $O(T^2 D)$ to multiply by $\bm{X}$, with state of size
+        $\bm{L}$ ($\Theta(T^2)$ if materialized).
+  \item NC-SSD pays $O(TND)$ to form $\bm{H}$, then $O(TND)$ for
+        $\bm{C}\bm{H}$, with state of size $\bm{H}\in\mathbb{R}^{N\times D}$
+        ($O(ND)$, \emph{independent of $T$}).
+\end{itemize}
+The price is uniformity: every query reads the same global summary
+$\bm{H}$, so the per-pair relative weight that $\bm{L}_{ij}$ encodes
+in SSD is gone. \cite{vssd} argues this is a correct trade for
+images, where no $1$-D distance is meaningful anyway.
+
+\paragraph{Practical note on parameterization.} \cite{vssd}~\S 3.2
+remarks that since $A_t$ and $1/A_t$ span the same range of values up
+to inversion, it is numerically simpler to learn $\bm{m}$ directly
+(equivalently, to learn $A$ via the existing projection
+\eqref{eq:projA} and then treat its output as $\bm{m}$). The two
+parameterizations differ only in the optimization geometry.
+
+\subsection{Relation to Mamba-3}\label{sec:ncssd-mamba3}
+
+VSSD is built on Mamba-2 (scalar $A$, two-term recurrence). The
+non-causality argument carries over to Mamba-3 unchanged: at the SSD
+level, both Mamba-2's \eqref{eq:L2} and Mamba-3's \eqref{eq:L3} have
+the same shape $\bm{Y} = (\bm{L}\odot\bm{C}\bm{B}^\top)\bm{X}$, and
+setting $\alpha_t \equiv 1$, $\gamma_t \mapsto 1/A_t$, $\beta_t \equiv 0$
+turns \eqref{eq:L3} into the rank-one mask $\bm{L}_{ij} = m_j$, which
+factors out of the Hadamard product:
+\begin{equation}
+  \bm{L}_{ij} = m_j
+  \;\Longrightarrow\;
+  \bm{L}\odot\bm{C}\bm{B}^\top
+     = \bm{C}\,(\bm{B}\odot\bm{m})^\top,
+\end{equation}
+recovering \eqref{eq:nc-Y}. The Mamba-3 extras compose cleanly on top
+of NC-SSD:
+\begin{itemize}
+  \item The RoPE trick of \S\ref{sec:rope} still applies: rotate
+        $\bm{B}_j, \bm{C}_i$ by $\bm{R}_{\le j}, \bm{R}_{\le i}$ before
+        \eqref{eq:nc-Y}, and the inner product
+        $\widetilde{\bm{C}}_i^\top \widetilde{\bm{B}}_j$ carries relative
+        positional information. With the 2-D factorization
+        \eqref{eq:rope2d}, this becomes the 2-D RoPE used by VSSD.
+  \item The MIMO extension of \S\ref{sec:mimo} carries over by
+        replicating \eqref{eq:nc-Y} per head: $\bm{Y}^{(i)} =
+        \bm{C}^{(i)}\bigl((\bm{B}^{(j)}\odot\bm{m})^\top\bm{X}^{(j)}\bigr)$,
+        summed over $j$.
+\end{itemize}
+The trapezoidal three-term form \eqref{eq:rec3} does \emph{not}
+survive the NC reduction: $\beta_t$ implements a two-band relative
+bias that fundamentally depends on $i,j$ separation, which the
+single-vector $\bm{m}$ cannot represent. VSSD-style NC-SSD is thus
+strictly a Mamba-2-style reduction of Mamba-3 — useful when the
+mask's expressivity is not needed (Section~\ref{sec:ncssd-when}).
+
+\subsection{Tensor-contraction algorithm}\label{sec:ncssd-tensor}
+
+\cite{vssd}~eq.~(9) writes \eqref{eq:nc-Y} as three einsum
+contractions, which matches the standard SSD kernel up to one
+collapsing step:
+\begin{align}
+  \bm{Z} &= \mathrm{contract}(LD, LN \to LND)(\bm{X}, \bm{B}), \label{eq:nc-Z}\\
+  \bm{H} &= \mathrm{contract}(L, LND \to ND)(\bm{m}, \bm{Z}), \label{eq:nc-H2}\\
+  \bm{Y} &= \mathrm{contract}(LN, ND \to LD)(\bm{C}, \bm{H}). \label{eq:nc-Y2}
+\end{align}
+Step~\eqref{eq:nc-Z} expands each token to its outer product
+$\bm{B}_j\bm{x}_j^\top$; step~\eqref{eq:nc-H2} reduces the $L$ axis
+into the single global state $\bm{H}$; step~\eqref{eq:nc-Y2} reads
+the state out per query. Compared with SSD's
+$\mathrm{contract}(LL, LDN \to ND)$ (\cite{vssd}~eq.~(9), top), the
+$LL$ mask has degenerated to an $L$-vector and the algorithm has no
+explicit $T\times T$ tensor at any point.
+
+\subsection{The VSSD image block}
+
+The NC-SSD operator \eqref{eq:nc-Y} replaces the SSD kernel inside an
+otherwise standard vision block. Following \cite{vssd}~\S 3.3:
+\begin{enumerate}
+  \item \textbf{Local Perception Unit (LPU)} \cite{vssd}: a depthwise
+        $3{\times}3$ convolution applied to the patch grid before the
+        NC-SSD and again before the FFN, injecting local 2-D
+        inductive bias on top of the global, position-independent
+        NC-SSD context.
+  \item \textbf{Depth-wise conv 1-D $\to$ 2-D.} The causal Conv1D
+        used inside Mamba-2 between the input and the SSD kernel is
+        replaced by a non-causal depth-wise Conv2D with kernel
+        size~$3$, consistent with the model being non-causal.
+  \item \textbf{2-D RoPE on $\bm{B},\bm{C}$.} The factored angle
+        \eqref{eq:rope2d} is applied to $\bm{C}_i$ and $\bm{B}_j$ before
+        the inner product in \eqref{eq:nc-Y}, restoring the spatial
+        relationship between patches that is otherwise lost in the
+        permutation-invariant global state $\bm{H}$. This is the
+        Mamba-3 RoPE trick of \S\ref{sec:rope} applied to the NC-SSD
+        kernel.
+  \item \textbf{FFN, residual, normalization.} A standard
+        Transformer-style FFN follows the NC-SSD; both the NC-SSD and
+        the FFN are wrapped in residual connections, matching the
+        ViT / Swin block layout rather than Mamba's pre-norm SwiGLU
+        layout.
+  \item \textbf{Hybrid with MSA in the last stage.} The four-stage
+        backbone uses NC-SSD blocks in stages~1--3 and standard
+        softmax MSA in the last stage. The rationale is that early
+        stages have many tokens, where the $O(T)$ scaling of NC-SSD
+        dominates; the last stage has few tokens but high-level
+        semantics, where the per-pair adaptivity of softmax MSA pays
+        off.
+  \item \textbf{Overlapped downsampling} between stages, in the
+        style of \cite{vssd}, replaces the non-overlapped patch
+        merging of VMamba.
+\end{enumerate}
+\paragraph{The vector $\bm{m}$ as a saliency map.} Because $\bm{m}\in
+\mathbb{R}^{L}$ acts as the only token-dependent weight in
+\eqref{eq:nc-Y}, it can be visualized as a 2-D heat map over the patch
+grid. Empirically \cite{vssd} report that $\bm{m}$ concentrates on
+the foreground object of the image — i.e.\ NC-SSD ends up learning a
+saliency-like weighting that the SSD mask $\bm{L}$ never makes
+explicit.
+
+\subsection{Worked example: VSSD on one $504\!\times\!504$ image}
+\label{sec:vssd-worked}
+
+Apply \eqref{eq:nc-Y} to the same single image
+$\bm{I}\in\mathbb{R}^{504\times 504\times 3}$, patch $P=14$, $D=384$,
+$H=6$ heads ($d_{\text{head}}=64$), state $N=64$, so that the input to
+the attention layer is the patch-token matrix
+$\bm{X}\in\mathbb{R}^{T\times D}=\mathbb{R}^{1296\times 384}$.
+
+\paragraph{Per-token quantities.}
+The projections produce
+\begin{equation}
+  \bm{B},\bm{C}\in\mathbb{R}^{T\times N}=\mathbb{R}^{1296\times 64},
+  \quad
+  \bm{V}\in\mathbb{R}^{T\times D}=\mathbb{R}^{1296\times 384},
+  \quad
+  \bm{m} = \mathrm{softplus}(A_{\log})\in\mathbb{R}_{>0}^{T}=\mathbb{R}_{>0}^{1296}.
+\end{equation}
+$\bm{V}$ stacks the value-projected rows $\bm{v}_t =
+\mathrm{SiLU}(\bm{W}_V\bm{x}_t)$ — the matrix that enters the NC-SSD
+identity \eqref{eq:nc-Y} (filling its placeholder $\bm{X}$, in the
+sense of the bridge of \S\ref{sec:self}).
+The crucial step is that $\bm{m}$ is a \emph{single positive scalar
+per patch} — independent of the query position. This is the
+degeneration of the $T\!\times\!T$ mask $\bm{L}$ into a single
+$T$-vector that \cite{vssd} exploits.
+
+\paragraph{Hidden state — a global summary of the image.}
+The contracted form \eqref{eq:nc-H2} sums all 1296 patches into one
+small object:
+\begin{equation}\label{eq:vssd-worked-H}
+  \bm{H}
+   \;=\; \sum_{t'=1}^{T} (\bm{B}_{t'}\,m_{t'})\,\bm{v}_{t'}^\top
+   \;\in\;\mathbb{R}^{N\times D} = \mathbb{R}^{64\times 384}.
+\end{equation}
+Total size: $N\!\cdot\!D = 24\,576$ scalars regardless of $T$ — the
+same 24\,576 numbers whether the image is $224^{2}$ ($T\!=\!256$),
+$504^{2}$ ($T\!=\!1296$), or $1008^{2}$ ($T\!=\!5184$). $\bm{H}$ is a
+rank-$N$ compressed picture of the image, weighted by the saliency
+$\bm{m}$.
+
+\paragraph{Per-patch readout.}
+Each output patch then reads from the global summary:
+\begin{equation}\label{eq:vssd-worked-Y}
+  \bm{Y}_t \;=\; \bm{C}_t\,\bm{H}
+  \;\in\;\mathbb{R}^{D},
+  \qquad
+  \bm{Y}\in\mathbb{R}^{T\times D} = \mathbb{R}^{1296\times 384}.
+\end{equation}
+\emph{Output shape equals input shape}: every patch still has one
+$D$-dim feature. The only patch-specific computation at read-out is
+the small product $\bm{C}_t\bm{H}$ ($N\!\cdot\!D$ multiply-adds per
+token). The expensive part — building $\bm{H}$ — was paid once.
+
+\paragraph{Comparing the three operators on this image.}
+On the same $T\!=\!1296$ tokens and same $N, D$:
+\begin{center}
+\begin{tabular}{|l|l|l|l|}
+\hline
+ & \textbf{SSD (Mamba-3)} & \textbf{Softmax MSA} & \textbf{NC-SSD (VSSD)} \\ \hline
+Per-pair coupling      & $\bm{L}_{ij}\!\cdot\!\bm{C}_i^\top\bm{B}_j$ & $\mathrm{softmax}(\bm{Q}_i^\top\bm{K}_j)$ & $m_j$ \emph{only} \\ \hline
+State size             & $\Theta(T^2)$ if $\bm{L}$ materialized & $\Theta(T^2)$ & $\Theta(ND) = 24\,576$ \\ \hline
+Cost (this image)      & $O(T^2 N) \approx 1.07\!\times\!10^{8}$ & $O(T^2 D) \approx 6.4\!\times\!10^{8}$ & $O(TND) \approx 3.2\!\times\!10^{7}$ \\ \hline
+Scaling with image side & quadratic in $T$ & quadratic in $T$ & linear in $T$ \\ \hline
+\end{tabular}
+\end{center}
+The NC-SSD column is roughly $20\times$ cheaper than softmax MSA on
+this image and stays linear when the image grows; the cost paid is
+that every output position reads from the \emph{same} summary
+$\bm{H}$, with the only token-dependent weight being the scalar
+$m_{t'}$ in \eqref{eq:vssd-worked-H}.
+
+\subsection{When to use NC-SSD versus bidirectional SSD}
+\label{sec:ncssd-when}
+
+\begin{center}
+\begin{tabular}{|l|l|l|}
+\hline
+ & \textbf{Bidirectional SSD} (\S\ref{sec:bidi}) & \textbf{NC-SSD} (this section)\\ \hline
+Mask state         & $O(T^2)$ (or banded fused kernel) & $O(ND)$ \\ \hline
+Compute per layer  & $O(T^2(N+D))\cdot k_{\text{scans}}$ & $O(TND)$ \\ \hline
+Per-pair adaptivity & $\bm{L}_{ij}$ and $\bm{C}_i^\top\bm{B}_j$ & $\bm{C}_i^\top\bm{B}_j$ only \\ \hline
+Position encoding   & decay in $|i-j|$ + RoPE   & RoPE only (decay collapses) \\ \hline
+Typical regime      & moderate $T$, structure-rich tokens & long $T$, vision-style tokens \\ \hline
+\end{tabular}
+\end{center}
+The two are not mutually exclusive: a hybrid stack can use NC-SSD in
+the early, high-resolution stages where $T$ dominates the cost, and
+bidirectional SSD (or softmax MSA, as in VSSD) in deeper stages where
+the mask's per-pair weighting matters. For our multi-view setting
+(\S\ref{sec:multiview}), NC-SSD also offers a free state-compressed
+cross-view block: each view's NC-SSD hidden state
+$\bm{H}^{(v)}\in\mathbb{R}^{N\times D}$ is already in the form that
+\eqref{eq:crossA-out} consumes, so cross-view attention reduces to
+$\bm{C}^{q\,\top}\sum_v \bm{H}^{(v)}$ with no additional kernel.
+
+%% ================================================================
+\section{Application: From the Token Tensor to a Segmentation Mask}
+\label{sec:seg}
+%% ================================================================
+
+The attention layers of Sections~\ref{sec:self}--\ref{sec:images} and
+the NC-SSD variant of Section~\ref{sec:ncssd-mamba3} all output a
+token tensor of the same shape as their input, $\bm{Y}\in
+\mathbb{R}^{T\times D}$ (for $H,W,P,D,T$ as in
+\S\ref{sec:self-worked}, the working example is
+$T\!=\!1296,\,D\!=\!384$). To produce a pixel-resolution semantic
+segmentation mask we attach a separate \emph{segmentation head} on top
+of $\bm{Y}$. This section spells out three standard heads with
+explicit shape annotations; the choice of head is independent of
+which attention variant produced $\bm{Y}$.
+
+Let $K$ denote the number of semantic classes and assume the
+attention backbone consumes images of size $H\!\times\!W$ with patch
+size $P$ so the grid is $H_p\!\times\!W_p = (H/P)\!\times\!(W/P)$ and
+$T = H_p W_p$.
+
+\subsection{Head A: linear projection $+$ bilinear upsample}
+\label{sec:seg-A}
+
+Following the Segmenter family \cite{vssd}-style minimal head:
+\begin{align}
+  \bm{Y} &\in\mathbb{R}^{T\times D}
+       \;\xrightarrow{\text{reshape}}\;
+       \bm{Y}^{\text{grid}}\in\mathbb{R}^{D\times H_p\times W_p}, \\
+  \bm{Z} &= \mathrm{Conv2D}_{1\times 1}^{D\to K}(\bm{Y}^{\text{grid}})
+       \;\in\;\mathbb{R}^{K\times H_p\times W_p}, \label{eq:seg-A-logits}\\
+  \widehat{\bm{S}} &= \mathrm{BilinearUpsample}_{\times P}(\bm{Z})
+       \;\in\;\mathbb{R}^{K\times H\times W}, \\
+  \widehat{m}(h,w) &= \arg\max_{k}\widehat{\bm{S}}_{k,h,w}.
+\end{align}
+For the running example $T\!=\!1296$, $D\!=\!384$, $P\!=\!14$,
+$K\!=\!21$ (PASCAL VOC):
+\begin{equation}
+  \bm{Y}_{\text{grid}}:(1,384,36,36)
+   \to \bm{Z}:(1,21,36,36)
+   \to \widehat{\bm{S}}:(1,21,504,504).
+\end{equation}
+Trainable parameters: just the $1{\times}1$ convolution
+$\bm{W}\in\mathbb{R}^{K\times D}$ ($D K = 384\cdot 21 = 8\,064$
+weights). The head is essentially a per-patch linear classifier
+followed by deterministic upsampling.
+
+\paragraph{Loss.} Train with per-pixel cross-entropy against the
+ground-truth label map $m^\star\in\{1,\dots,K\}^{H\times W}$,
+optionally augmented with Dice loss for class balance:
+\begin{equation}
+  \mathcal{L}_{\text{seg}}
+   = -\frac{1}{HW}\sum_{h,w}\log
+     \frac{\exp \widehat{\bm{S}}_{m^\star(h,w),h,w}}
+          {\sum_{k}\exp \widehat{\bm{S}}_{k,h,w}}
+   + \lambda\,\mathcal{L}_{\text{Dice}}(\widehat{\bm{S}},\bm{m}^\star).
+\end{equation}
+
+\subsection{Head B: multi-scale DPT-style decoder}
+\label{sec:seg-B}
+
+When the attention backbone is deep (e.g.\ 12 blocks), tap
+intermediate token tensors from layers
+$\ell_1<\ell_2<\ell_3<\ell_4$ — call them
+$\bm{Y}^{(\ell_k)}\in\mathbb{R}^{T\times D}$. Reassemble each into a
+$D\!\times\!H_p\!\times\!W_p$ grid and feed into a top-down fusion
+pyramid (\emph{Reassemble} $+$ \emph{Fusion} blocks, identical in
+structure to DA3's Dual-DPT but with a per-pixel classifier head
+instead of a depth regressor). At each pyramid level the spatial
+resolution doubles via transposed convolution, while $D$ shrinks:
+\begin{align}
+  \bm{F}^{(4)} &\in\mathbb{R}^{C\times H_p\times W_p}
+       = \mathbb{R}^{256\times 36\times 36}, \\
+  \bm{F}^{(3)} &\in\mathbb{R}^{C/2\times 2H_p\times 2W_p}
+       = \mathbb{R}^{128\times 72\times 72}, \notag \\
+  \bm{F}^{(2)} &\in\mathbb{R}^{C/4\times 4H_p\times 4W_p}
+       = \mathbb{R}^{64\times 144\times 144}, \\
+  \bm{F}^{(1)} &\in\mathbb{R}^{C/8\times H\times W}
+       = \mathbb{R}^{32\times 504\times 504}, \notag\\
+  \widehat{\bm{S}} &= \mathrm{Conv2D}_{1\times 1}^{C/8\to K}(\bm{F}^{(1)})
+       \;\in\;\mathbb{R}^{K\times H\times W}.
+\end{align}
+This is strictly more expensive than Head~A (millions of parameters
+in the fusion path) but recovers fine boundary detail that the
+patch-coarse Head~A cannot. The Mamba-3 / VSSD attention operates at
+the coarse $36\!\times\!36$ resolution throughout; all the high-frequency
+structure of the final mask is synthesised by the fusion pyramid from
+the $36\!\times\!36$ token grid.
+
+\subsection{Head C: mask-classification with learnable queries}
+\label{sec:seg-C}
+
+In the MaskFormer / Mask2Former style, introduce $Q$ learnable query
+tokens $\bm{q}_1,\dots,\bm{q}_Q\in\mathbb{R}^{D}$ (e.g.\ $Q\!=\!100$),
+treat the patch tokens $\bm{Y}$ as keys/values, and run a small
+\emph{cross-attention stack} on top — exactly the Mamba-3
+cross-attention of Section~\ref{sec:cross}. Each query then predicts
+(i) a class probability and (ii) a soft binary mask that picks out
+which patches belong to it.
+
+Concretely, write
+$\bm{Q}\in\mathbb{R}^{Q\times D}$ for the queries (after a few cross-
+attention blocks) and split each into two heads:
+\begin{align}
+  \bm{c}_q^{\text{cls}} &= \mathrm{MLP}_{\text{cls}}(\bm{q}_q)\in\mathbb{R}^{K+1}, \\
+  \bm{e}_q^{\text{mask}} &= \mathrm{MLP}_{\text{mask}}(\bm{q}_q)\in\mathbb{R}^{D}.
+\end{align}
+The class-conditional masks come from a per-patch dot product:
+\begin{equation}
+  \bm{M}_q \;=\; \bm{Y}\,\bm{e}_q^{\text{mask}}
+   \;\in\;\mathbb{R}^{T},
+  \qquad
+  \bm{M}\in\mathbb{R}^{Q\times T}=\mathbb{R}^{100\times 1296}.
+\end{equation}
+Reshape $\bm{M}$ to $\mathbb{R}^{Q\times H_p\times W_p}$, bilinear
+upsample to $\mathbb{R}^{Q\times H\times W}$, then form the per-class
+semantic map by marginalising over queries:
+\begin{equation}\label{eq:seg-C-marginal}
+  \widehat{\bm{S}}_k(h,w)
+   \;=\; \sum_{q=1}^{Q}
+         \mathrm{softmax}_q(\sigma(\bm{M}_q(h,w)))\,
+         \mathrm{softmax}_K(\bm{c}_q^{\text{cls}})_k,
+\end{equation}
+with $\sigma$ the sigmoid. Each query effectively claims a region of
+the patch grid (via $\bm{M}_q$) and a class (via $\bm{c}_q^{\text{cls}}$);
+\eqref{eq:seg-C-marginal} blends those claims at pixel resolution.
+Trainable parameters are the query embeddings, the two MLPs, and
+the cross-attention stack — typically $\sim$few-M parameters, smaller
+than Head~B's full DPT pyramid but more expressive than Head~A.
+
+\paragraph{Loss.} Hungarian matching between predicted queries and GT
+instances, then cross-entropy on $\bm{c}^{\text{cls}}$ + per-pixel
+binary cross-entropy on $\bm{M}_q$ (or Dice) for the matched pairs.
+
+\subsection{Why the attention variant is interchangeable}
+
+Heads A, B, and C all consume $\bm{Y}\in\mathbb{R}^{T\times D}$ and
+nothing more. Whether $\bm{Y}$ was produced by
+\eqref{eq:self-out} (SSD self-attention), \eqref{eq:bidi4}
+(bidirectional SSD), or \eqref{eq:nc-Y} (NC-SSD / VSSD), the
+downstream pipeline is identical. The only practical differences are:
+
+\begin{itemize}
+  \item NC-SSD / VSSD's per-patch saliency
+        $\bm{m}\in\mathbb{R}^{T}$ already concentrates on the
+        foreground (\S\ref{sec:vssd-worked}); this provides a useful
+        \emph{initial} class-agnostic mask that Head~C can refine
+        with class identity, which is consistent with Mask2Former's
+        finding that good initial query-region proposals shorten
+        training.
+  \item Bidirectional SSD's structured mask $\bm{L}_{ij}$ encodes a
+        relative position bias; this is most useful for Head~A
+        (which has no other position information at the output) and
+        less critical for Heads~B/C (which inject position via the
+        decoder's spatial structure or query embeddings).
+  \item The cost asymmetry of \S\ref{sec:vssd-worked} — NC-SSD's
+        $O(TND)$ vs softmax MSA's $O(T^2D)$ — propagates: with NC-SSD
+        the bottleneck moves from the backbone to the segmentation
+        head, especially Head~B's pyramid, so high-resolution
+        segmentation benefits disproportionately from VSSD backbones.
+\end{itemize}
+
+%% ================================================================
+\section{Application: Multi-Frame 3D Point Tracking}
+\label{sec:tracking}
+%% ================================================================
+
+A video clip is a sequence of $F$ RGB frames
+$\bm{I}^{(1)},\dots,\bm{I}^{(F)}\in\mathbb{R}^{H\times W\times 3}$.
+The point-tracking task is to maintain a set of $N$ persistent
+\emph{tracks}; for every track $n\in\{1,\dots,N\}$ and every frame
+$t\in\{1,\dots,F\}$ we predict
+\begin{itemize}
+  \item a 3D position $\bm{p}_n^{(t)} \in \mathbb{R}^{3}$ in a
+        shared world frame,
+  \item a visibility / alive flag $\sigma_n^{(t)} \in [0, 1]$ —
+        $\sigma_n^{(t)} \!\to\! 1$ when track $n$ is observed in
+        frame $t$, $\sigma_n^{(t)} \!\to\! 0$ when it has disappeared
+        (occlusion, out-of-frame, end-of-life), and
+  \item a spawn-confidence $\rho_n^{(t)} \in [0, 1]$ — $\rho_n^{(t)}
+        \!\to\! 1$ on the frame at which a new track is born.
+\end{itemize}
+Tracks must keep identity across frames so that
+$\bm{p}_n^{(t)}$ and $\bm{p}_n^{(t')}$ are positions of \emph{the same
+physical 3D point} at times $t$ and $t'$.
+
+This chapter assembles two Mamba-3 attention blocks of different types:
+\textbf{non-causal VSSD self-attention within each frame} (\S\ref{sec:ncssd-mamba3}),
+because a single image has no causal direction, and
+\textbf{causal SSD cross-attention across frames} (\S\ref{sec:crossB}),
+because a track at time $t$ may depend on its history at times
+$\le t$ but not on the future. Together they realize a streaming
+tracker that is linear in patch count and linear in frame count.
+
+\subsection{Architecture overview}
+\label{sec:track-arch}
+
+\begin{center}\small
+\begin{tabular}{|l|c|c|c|}
+\hline
+Block & Operator & Inputs & Output \\ \hline
+Per-frame encoder
+  & VSSD self-attn \eqref{eq:nc-Y}
+  & frame patches $\bm{X}^{(t)}\in\mathbb{R}^{T\times D}$
+  & frame features $\bm{Y}^{(t)}\in\mathbb{R}^{T\times D}$ \\ \hline
+Track propagation
+  & causal cross-SSD \eqref{eq:crossB-out}
+  & queries $\bm{Q}^{(t-1)}$ + features $\bm{Y}^{(t)}$
+  & updated queries $\bm{Q}^{(t)}$ \\ \hline
+Position head
+  & MLP
+  & $\bm{Q}^{(t)}$
+  & $\bm{p}^{(t)},\,\sigma^{(t)},\,\rho^{(t)}$ \\ \hline
+\end{tabular}
+\end{center}
+
+A \emph{query-conditioned bank}
+$\bm{Q}^{(t)} = (\bm{q}_1^{(t)},\dots,\bm{q}_N^{(t)})^\top
+\in\mathbb{R}^{N\times D}$ carries the identity of every track from
+one frame to the next. Unlike a free-floating learnable bank, each
+slot $n$ is \emph{tied to a specific physical point} at construction
+time: given the user-supplied query
+$(x_n^{q}, y_n^{q}, t_n^{q})$ — a pixel location and an anchor frame
+— the initial bank state is obtained by bilinear-sampling the
+encoder's finest pyramid feature at that location:
+\begin{equation}\label{eq:track-bank-init}
+  \bm{q}_n^{(0)} \;=\; \mathrm{BilinearSample}\!\bigl(
+    \bm{Y}^{(t_n^{q})},\; \tfrac{x_n^{q}}{W}\cdot W_{\!grid},\;
+                          \tfrac{y_n^{q}}{H}\cdot H_{\!grid}\bigr)
+  \;\in\; \mathbb{R}^{D},
+\end{equation}
+where $W_{\!grid}\times H_{\!grid}$ is the finest pyramid level's
+spatial extent. This eliminates the slot-assignment ambiguity that
+otherwise arises when free-floating slots are matched to ground-truth
+tracks via Hungarian assignment: there, the matching flips between
+batches and the gradient signal becomes incoherent. With
+\eqref{eq:track-bank-init} the slot identity is fixed by the input,
+slot $n$ always means \emph{the trajectory of physical point
+$(x_n^{q}, y_n^{q}, t_n^{q})$}, and gradients accumulate coherently
+per slot.
+
+At each frame $t$:
+
+\begin{enumerate}
+  \item Encode the frame: $\bm{X}^{(t)} \to \bm{Y}^{(t)}$ via the
+        VSSD operator (\S\ref{sec:track-self}).
+  \item Update the bank: $\bm{Q}^{(t-1)} \xrightarrow{~\text{cross-SSD over time}~} \bm{Q}^{(t)}$
+        using $\bm{Y}^{(1)},\dots,\bm{Y}^{(t)}$ as keys / values, with
+        a causal mask that hides future frames
+        (\S\ref{sec:track-cross}).
+  \item Read out 3D position, visibility, and spawn-confidence per
+        track via small MLP heads (\S\ref{sec:track-heads}).
+\end{enumerate}
+
+\subsection{Within-frame block: VSSD self-attention}
+\label{sec:track-self}
+
+Each frame $t$ goes through the same VSSD self-attention block as
+\S\ref{sec:vssd-worked}, independently of the others. Concretely
+with $H\!\times\!W = 504\!\times\!504$, patch $P=14$, $D=384$,
+$N=64$:
+\begin{align}
+  \bm{X}^{(t)} &\;\in\; \mathbb{R}^{T\times D} \;=\; \mathbb{R}^{1296\times 384}
+  &&\text{(frame-$t$ patch tokens)}, \\
+  \bm{B}^{(t)},\bm{C}^{(t)} &\;\in\; \mathbb{R}^{T\times N}, \quad
+  \bm{V}^{(t)} \;\in\; \mathbb{R}^{T\times D}, \quad
+  \bm{m}^{(t)} \;\in\; \mathbb{R}_{>0}^{T}, \\
+  \bm{H}^{(t)} &\;=\; \bigl(\bm{B}^{(t)}\odot\bm{m}^{(t)}\bigr)^\top\bm{V}^{(t)}
+  \;\in\; \mathbb{R}^{N\times D}, \\
+  \bm{Y}^{(t)} &\;=\; \bm{C}^{(t)}\,\bm{H}^{(t)}
+  \;\in\; \mathbb{R}^{T\times D} = \mathbb{R}^{1296\times 384}.
+\end{align}
+The choice of VSSD (non-causal) over bidirectional SSD has two
+motivations specific to tracking: (i) within a single frame there is
+no preferred direction in the patch grid, and (ii) the $N\!\cdot\!D
+= 24\,576$-scalar global summary $\bm{H}^{(t)}$ is independent of
+$T$, so high-resolution tracking (large $T$) does not blow the
+within-frame budget. Compute per frame is $O(TND)$, memory is
+$O(ND)$ for the summary.
+
+\subsection{Across-frame block: causal cross-SSD}
+\label{sec:track-cross}
+
+The query bank reads from the frame features via the cross-SSD
+operator of \S\ref{sec:crossB}, but with two crucial choices:
+
+\begin{enumerate}
+  \item[\textbf{(a)}] \textbf{Queries are the persistent bank.}
+        Take $\bm{C}^{q,(t)} \!\in\! \mathbb{R}^{N\times N_{\!state}}$
+        from $\bm{Q}^{(t-1)}$, the previous frame's bank — these are
+        the \emph{tracks asking ``where am I now?''} The kv side
+        comes from the new frame's features
+        $\bm{Y}^{(t)} \in \mathbb{R}^{T\times D}$, projected to
+        $\bm{B}^{kv,(t)} \in \mathbb{R}^{T\times N_{\!state}}$ and
+        used as the value matrix in place of $\bm{V}^{kv}$. Reading
+        from $T$ patches into $N$ tracks costs $O(N T N_{\!state})$
+        in Variant~B or $O(T N_{\!state} D)$ for the state of
+        Variant~A.
+  \item[\textbf{(b)}] \textbf{The mask is causal in time, not in
+        patches.} Stack the kv side over the frames seen so far,
+        $\bm{Y}^{(1)},\dots,\bm{Y}^{(t)}\in\mathbb{R}^{T\times D}$,
+        and let the cross-mask
+        $\bm{L}^{\text{cross}}\in\mathbb{R}^{N\times tT}$ block the
+        future:
+        \begin{equation}\label{eq:track-causal-mask}
+          \bm{L}^{\text{cross}}_{n,\,(s, j)}
+           \;=\; \mathbb{I}\bigl[s\le t\bigr]\cdot
+                 \Bigl(\!\prod_{k=s+1}^{t}\alpha_k\Bigr)\,\gamma_s,
+        \end{equation}
+        where the second factor is the same temporal decay profile
+        as the SSD mask of \eqref{eq:L2}, but now the running index
+        is over frames rather than tokens, and the cell
+        $\bm{L}^{\text{cross}}_{n,(s,j)}$ is shared across all
+        patches $j$ of frame $s$. The indicator
+        $\mathbb{I}[s\le t]$ enforces temporal causality so a track
+        at time $t$ cannot peek at frames $>t$. This is exactly the
+        recipe of \S\ref{sec:crossB} adapted from token causality to
+        frame causality.
+\end{enumerate}
+Concretely, the per-frame update of the bank is
+\begin{equation}\label{eq:track-update}
+  \boxed{\;
+    \bm{Q}^{(t)}
+     \;=\; \bigl(\bm{L}^{\text{cross}}\odot\bm{C}^{q,(t)}\bm{B}^{kv,(1{:}t)\,\top}\bigr)\,
+            \bm{V}^{kv,(1{:}t)}
+     \;\in\; \mathbb{R}^{N\times D},
+  \;}
+\end{equation}
+where the $(1{:}t)$ superscript denotes vertical stacking over the
+first $t$ frames. With the Mamba-3 recurrent form
+\eqref{eq:ssd-bridge-rec} the right-hand side is computed
+\emph{incrementally}: maintain a frame-level hidden state
+$\bm{h}^{(t)}_{\text{track}} \in \mathbb{R}^{N\!\times\!N_{\!state}\!\times\!D}$
+that is updated in place each frame, so the streaming cost is
+$O(N N_{\!state} D)$ per frame — independent of clip length.
+
+\subsection{Per-track read-out heads}
+\label{sec:track-heads}
+
+Each updated query $\bm{q}_n^{(t)} \in \mathbb{R}^{D}$ passes through
+three small MLPs:
+\begin{align}
+  \Delta\bm{p}_n^{(t)} &\;=\; \mathrm{MLP}_{\text{xyz}}(\bm{q}_n^{(t)}) \;\in\; \mathbb{R}^{3},
+  & &\text{(motion since query anchor)}\\
+  \sigma_n^{(t)} &\;=\; \sigma\!\bigl(\mathrm{MLP}_{\text{vis}}(\bm{q}_n^{(t)})\bigr) \;\in\; [0, 1],
+  & &\text{(visibility / alive)}\\
+  \rho_n^{(t)}   &\;=\; \sigma\!\bigl(\mathrm{MLP}_{\text{spawn}}(\bm{q}_n^{(t)})\bigr) \;\in\; [0, 1],
+  & &\text{(spawn flag)}
+\end{align}
+where $\sigma$ is the sigmoid. The position head predicts
+$\Delta\bm{p}_n^{(t)}$ — the motion of track $n$ at frame $t$ relative
+to its own query-anchor position — rather than absolute coordinates.
+A monocular model cannot recover the absolute metric scale of the
+scene from RGB alone, so any absolute-position prediction is
+identifiable only up to an unknown per-clip scale factor; predicting
+the relative trajectory side-steps that ambiguity entirely (the
+relative motion is well-defined given the camera and the trajectory
+shape). At inference, the absolute prediction is recovered as
+$\bm{p}_n^{(t)} = \bm{p}_n^{q} + \Delta\bm{p}_n^{(t)}$ using the query
+anchor position $\bm{p}_n^{q}$ (which the TAPVid-3D evaluator provides
+as the per-track GT position at the query frame).
+
+Stacking over all $N$ tracks gives the predicted trajectory tensor
+\begin{equation}
+  \bigl(\Delta\bm{p}^{(t)},\,\bm{\sigma}^{(t)},\,\bm{\rho}^{(t)}\bigr)
+  \;\in\; \mathbb{R}^{N\times 3}\,\times\,[0,1]^{N}\,\times\,[0,1]^{N}.
+\end{equation}
+
+\subsection{Spawn and disappear}
+\label{sec:track-spawn}
+
+With query-conditioned initialisation \eqref{eq:track-bank-init}, $N$
+equals the number of user-supplied queries — there is no fixed worst-
+case slot count to over-allocate, and no need for the Mask2Former-style
+``no-object'' class or Hungarian-spawn matching.
+
+\textbf{Disappear.} A track is treated as occluded at frame $t$ when
+$\sigma_n^{(t)} < \tau_{\text{vis}}$ (e.g.\ $\tau_{\text{vis}}=0.3$).
+Its query embedding $\bm{q}_n^{(t)}$ still updates from the
+cross-attention, so the track can \emph{re-emerge} if it becomes
+visible again — the visibility flag is decoupled from the query
+state.
+
+\textbf{Spawn / birth frame.} The query $(x_n^{q}, y_n^{q}, t_n^{q})$
+specifies when track $n$ is \emph{seeded}; the spawn-confidence head
+$\rho_n^{(t)}$ predicts when within the clip the underlying physical
+point first becomes visible, which the loss
+$\mathcal{L}_{\text{spawn}}$ supervises against
+$\mathbb{I}[t = t_n^{\text{birth}}]$. New physical points entering the
+scene after the clip's first frame are accommodated by adding a new
+query at the appropriate $(x, y, t)$; the bank then grows by one slot
+without retraining.
+
+\subsection{Loss}
+\label{sec:track-loss}
+
+Because \eqref{eq:track-bank-init} pins slot $n$ to the query $(x_n^{q},
+y_n^{q}, t_n^{q})$, there is no slot-assignment freedom — slot $n$
+\emph{is} GT track $n$ by construction. No Hungarian matching is
+needed. Let $\bm{p}_n^{\star,(t)}$, $\sigma_n^{\star,(t)}$ be the
+ground-truth 3D position and visibility for that track at frame $t$,
+and let $\bm{p}_n^{q} := \bm{p}_n^{\star,(t_n^{q})}$ be the GT 3D
+position at the query anchor. The ground-truth motion is
+\begin{equation}\label{eq:track-delta-star}
+  \Delta\bm{p}_n^{\star,(t)} \;:=\; \bm{p}_n^{\star,(t)} - \bm{p}_n^{q},
+\end{equation}
+and the model's prediction $\Delta\bm{p}_n^{(t)}$ from
+\S\ref{sec:track-heads} is compared against this.
+
+\paragraph{Per-clip scale normalisation.}
+Different TAPVid-3D subsets span very different metric scales
+(pstudio / adt are 1--5\,m indoor scenes; drivetrack is 10--50\,m
+outdoor driving). An un-normalised L1 on $\Delta\bm{p}$ would make a
+drivetrack batch's gradient $\sim$10$\times$ larger than a pstudio
+batch's, swamping the optimisation. Following the TAPVid-3D
+evaluator's \texttt{scaling=`median'} convention, normalise both
+sides by a per-clip scale
+\begin{equation}\label{eq:track-scale}
+  s \;=\; \mathrm{median}\!\bigl(\|\bm{p}_n^{q}\|_2 \;:\; n \in \mathcal{N}\bigr)
+  \;+\; \varepsilon,
+\end{equation}
+where $\mathcal{N}$ ranges over the GT tracks in the clip and
+$\varepsilon$ is a small positive constant (e.g.\ $10^{-3}$\,m). The
+scaled position residual is then
+\begin{equation}\label{eq:track-resid}
+  \bm{r}_n^{(t)} \;:=\; \tfrac{1}{s}\bigl(\Delta\bm{p}_n^{(t)} - \Delta\bm{p}_n^{\star,(t)}\bigr).
+\end{equation}
+
+\paragraph{Loss terms (v6 — Smooth-L1, magnitude, direction-cosine, 2-D reprojection).}
+A plain $\ell_1$ on the scaled residual gives the optimiser the same
+constant gradient $\pm 1/s$ whether the residual is 1\,cm or 1\,m. With
+many TAPVid-3D queries moving only a few cm per 8-frame window,
+``predict $\Delta\bm{p} \!\approx\! 0$'' is a competitive local minimum
+under $\ell_1$, and the model collapses there. v6 adds three terms that
+attack the zero-motion baseline and one that grounds the prediction in
+pixel space:
+\begin{itemize}
+  \item \textbf{Scale-normalised Smooth-$\ell_1$ position} (Huber with
+        $\delta\!=\!1$) on visible frames:
+        \begin{equation}\label{eq:track-pos-loss}
+          \mathcal{L}_{\text{pos}}
+            \;=\;
+            \frac{1}{Z_{\text{pos}}}\sum_{n,t}
+              \sigma_n^{\star,(t)}\,
+              \sum_{c\in\{x,y,z\}}
+              \mathrm{SmoothL1}\!\bigl(\bm{r}_n^{(t)}[c]\bigr),
+        \end{equation}
+        with $Z_{\text{pos}} = \sum_{n,t}\sigma_n^{\star,(t)}$. Quadratic
+        near zero, linear far away $\Rightarrow$ small residuals receive
+        small gradient, so the optimiser stops wasting capacity reducing
+        already-small errors and focuses on the big-error tracks where
+        ``predict $0$'' is most wrong.
+  \item \textbf{Scaled magnitude penalty}:
+        \begin{equation}\label{eq:track-mag-loss}
+          \mathcal{L}_{\text{mag}}
+            \;=\;
+            \frac{1}{Z_{\text{pos}}}\sum_{n,t}
+              \sigma_n^{\star,(t)}
+              \Bigl(\tfrac{\|\Delta\bm{p}_n^{(t)}\| -
+                            \|\Delta\bm{p}_n^{\star,(t)}\|}{s}\Bigr)^{2}.
+        \end{equation}
+        Forces the predicted motion to have the right \emph{magnitude
+        ratio to scene scale}, which under a monocular camera is the
+        only magnitude information geometrically recoverable.
+  \item \textbf{Direction cosine}:
+        \begin{equation}\label{eq:track-dir-loss}
+          \mathcal{L}_{\text{dir}}
+            \;=\;
+            \frac{1}{Z_{\text{pos}}}\sum_{n,t}
+              \sigma_n^{\star,(t)}
+              \bigl(1 - \cos\!\bigl(\Delta\bm{p}_n^{(t)},
+                                     \Delta\bm{p}_n^{\star,(t)}\bigr)\bigr).
+        \end{equation}
+        Penalises wrong-direction motion regardless of magnitude. A
+        model that gets the direction right but under-shoots magnitude
+        is preferred over one that predicts the right magnitude in the
+        wrong direction.
+  \item \textbf{2-D pixel-space reprojection.} The TAPVid-3D queries are
+        natively 2-D pixel locations; supervising in pixel space gives
+        the model a geometric signal that is in-distribution with the
+        input image and that has \emph{no} scale ambiguity:
+        \begin{align}
+          \hat{\bm{p}}_n^{(t)} &= \bm{p}_n^{q} + \Delta\bm{p}_n^{(t)},
+          \quad
+          \hat{\bm{u}}\hat{\bm{v}}_n^{(t)} = \pi\!\bigl(\hat{\bm{p}}_n^{(t)}, \bm{K}\bigr),
+          \notag\\
+          \mathcal{L}_{\text{reproj}}
+            &= \frac{1}{Z_{\text{pos}}\,W_{\text{img}}}\sum_{n,t}
+                 \sigma_n^{\star,(t)}\,
+                 \sum_{c\in\{u,v\}}
+                 \mathrm{SmoothL1}\!\bigl(
+                   \hat{\bm{u}}\hat{\bm{v}}_n^{(t)}[c] - \bm{u}\bm{v}_n^{\star,(t)}[c]
+                 \bigr),
+          \label{eq:track-reproj-loss}
+        \end{align}
+        where $\pi(\cdot, \bm{K})$ is pinhole projection through the
+        per-clip intrinsics and $W_{\text{img}}$ is the image side
+        length used for training (normalises the pixel residual to
+        $\sim\![0, 1]$).
+  \item \textbf{Visibility BCE}, \textbf{spawn BCE}, and \textbf{temporal
+        smoothness} unchanged from \S\,v5.
+\end{itemize}
+The total loss is
+\begin{equation}
+  \mathcal{L}
+    = \lambda_{\text{pos}}\mathcal{L}_{\text{pos}}
+    + \lambda_{\text{mag}}\mathcal{L}_{\text{mag}}
+    + \lambda_{\text{dir}}\mathcal{L}_{\text{dir}}
+    + \lambda_{\text{reproj}}\mathcal{L}_{\text{reproj}}
+    + \lambda_{\text{vis}}\mathcal{L}_{\text{vis}}
+    + \lambda_{\text{spawn}}\mathcal{L}_{\text{spawn}}
+    + \lambda_{\text{smooth}}\mathcal{L}_{\text{smooth}},
+\end{equation}
+with default weights $(1,\,0.5,\,0.5,\,1,\,0.5,\,0.5,\,0.1)$.
+
+The cross-attention's causal mask \eqref{eq:track-causal-mask}
+ensures that the loss at frame $t$ depends only on frames $\le t$;
+gradients flow back through the recurrent hidden state
+$\bm{h}^{(t)}_{\text{track}}$, so the network learns a streaming
+update rule, not a teacher-forced batch tracker.
+
+\subsection{Why this operator pairing}
+\label{sec:track-why}
+
+VSSD self-attention and causal cross-SSD have complementary
+strengths matched to the two axes of the tracking problem:
+\begin{itemize}
+  \item Within a frame, structure is 2-D and orderless — every patch
+        can in principle inform every other. VSSD reaches that
+        all-to-all coverage at $O(T)$ cost via the rank-$N$ global
+        summary $\bm{H}^{(t)}$, instead of the $O(T^{2})$ that
+        softmax MSA or bidirectional SSD would pay
+        (\S\ref{sec:vssd-worked}'s ratio: $\sim$\,$20\!\times$
+        cheaper on a $504^{2}$ image).
+  \item Across frames, structure is 1-D and causally ordered — frame
+        $t$ depends on its history. Causal SSD with the temporal
+        mask \eqref{eq:track-causal-mask} preserves that ordering
+        and admits a $O(1)$-per-frame streaming recurrence
+        \eqref{eq:ssd-bridge-rec}, so the tracker's memory does not
+        grow with clip length. The full $\bm{L}^{\text{cross}}$
+        never needs to be materialised at inference.
+\end{itemize}
+The persistent query bank $\bm{Q}^{(t)}$ is the bridge: it is
+updated by both blocks (VSSD-encoded features feed it through
+cross-SSD), but its size $N\!\times\!D$ never depends on either the
+patch count $T$ or the clip length $F$. The end-to-end forward pass
+is $O(F \cdot T N D)$ in time, $O(N T_{\max} N_{\!state} D)$ in
+memory if the within-frame summaries $\bm{H}^{(t)}$ are kept (the
+default), or $O(N N_{\!state} D)$ if only the rolling track hidden
+state is kept (streaming inference).
+
+%% ================================================================
+\section{End-to-End Summary}
+%% ================================================================
+
+Using only \eqref{eq:ssd-derived}, we have obtained:
+
+\begin{itemize}
+  \item \textbf{Self-attention:} \eqref{eq:self-out} and, with
+        learned RoPE, \eqref{eq:self-rope}. Multi-head via
+        \eqref{eq:mimo-self}.
+  \item \textbf{Cross-attention:} Variant~A \eqref{eq:crossA-out}
+        (cheap, compressed KV) and Variant~B \eqref{eq:crossB-out}
+        (exact).
+  \item \textbf{Image encoder:} patchify + bidirectional /
+        multi-direction SSD self-attention
+        (\eqref{eq:bidi2},\eqref{eq:bidi4}) with 2-D RoPE
+        \eqref{eq:rope2d}.
+  \item \textbf{Multi-view encoder:} alternating within-view
+        \eqref{eq:cvout}-style blocks and cross-view
+        \eqref{eq:Lxview} blocks; or the compressed-state cross
+        block \eqref{eq:crossA-out} when one side dominates.
+  \item \textbf{Non-causal SSD (VSSD):} reinterpret $A_t$ as a
+        current-token weight to obtain \eqref{eq:nc-Y},
+        $\bm{Y} = \bm{C}\bigl((\bm{B}\odot\bm{m})^\top\bm{X}\bigr)$,
+        which collapses the $T\times T$ mask $\bm{L}$ to a
+        $T$-vector $\bm{m}$, removes causality without multi-scan,
+        and yields the VSSD image block (Section~\ref{sec:ncssd}).
+\end{itemize}
+
+Every output formula above is a direct application of the single
+identity
+\begin{equation*}
+  \bm{Y} = (\bm{L}\odot\bm{C}\bm{B}^\top)\bm{X},
+\end{equation*}
+which we derived from the Mamba-3 recurrence in
+Section~\ref{sec:ssd}. The choices made by a specific architecture
+amount to (i) which tokens supply $\bm{B},\bm{C},\bm{X}$ (self vs
+cross vs multi-view), and (ii) which structured mask $\bm{L}$ is used
+(causal vs bidirectional vs block-diagonal vs view-masked). Mamba-3's
+exponential-trapezoidal rule \eqref{eq:L3} and RoPE trick
+\eqref{eq:complex-rec} then give the mask and the query/key its final,
+expressive form.
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}

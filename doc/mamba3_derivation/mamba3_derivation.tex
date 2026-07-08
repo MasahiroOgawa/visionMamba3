@@ -1,0 +1,248 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage{amsmath,amssymb}
+\usepackage[margin=2.5cm]{geometry}
+
+\title{Derivation of All Mamba-3 Equations}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+This article derives the key equations in the Mamba-3 paper with one goal: \textbf{every single step should be easy to follow}. No steps are skipped. Each equation transforms into the next with a clear reason. If you can follow basic calculus and linear algebra, you can follow this entire derivation.
+
+\section{Definitions: Dimensions and Parameters}
+
+\subsection{Basic Dimensions}
+
+\begin{itemize}
+  \item $T$: Sequence Length
+  \item $D$: Number of Input/Output Channels (Model Dimension)
+  \item $N$: State Dimension (per channel)
+\end{itemize}
+
+\subsection{Variable Dimension Definitions}
+
+\begin{itemize}
+  \item $\mathbf{X} \in \mathbb{R}^{T \times D}$: Input sequence
+  \item $\mathbf{Y} \in \mathbb{R}^{T \times D}$: Output sequence
+  \item $\mathbf{h}(t) \in \mathbb{C}^{D \times N}$: State matrix. Each column $\mathbf{h}_d(t) \in \mathbb{C}^{N \times 1}$ is the state vector of channel~$d$.
+  \item $\mathbf{A}(t)$: Collection of diagonal components.
+    \begin{itemize}
+      \item Storage dimension: $\mathbb{C}^{D \times N}$. Each element $A_{d,n}(t)$ is the complex coefficient for the $n$-th state of channel~$d$.
+      \item Operational dimension: $\mathbb{C}^{D \times N \times N}$. For each channel~$d$, it acts as an $N \times N$ diagonal matrix $\mathbf{A}_d(t) = \mathrm{diag}(A_{d,1}(t), \dots, A_{d,N}(t))$.
+    \end{itemize}
+  \item $\mathbf{B}(t) \in \mathbb{R}^{T \times N}$, $\mathbf{C}(t) \in \mathbb{R}^{T \times N}$: Projection vectors shared across all channels.
+\end{itemize}
+
+%% ====================================================================
+\section{Derivation of Equation~(1): The Discrete SSM Recurrence}
+%% ====================================================================
+
+The paper's equation~(1) is the discrete-time recurrence:
+\begin{equation}\label{eq:paper-eq1}\tag{paper 1}
+  \mathbf{h}_t = \alpha_t\,\mathbf{h}_{t-1} + \gamma_t\,\mathbf{B}_t\,\mathbf{x}_t,
+  \qquad
+  \mathbf{y}_t = \mathbf{C}_t^\top\,\mathbf{h}_t
+\end{equation}
+where:
+\begin{itemize}
+  \item $A_t < 0$ is a scalar (the \emph{scalar SSM} parameterization: $\mathbf{A}_t = A_t\,\mathbf{I}_N$).
+    The constraint $A_t < 0$ ensures stability: in the continuous-time ODE, the homogeneous solution is $\mathbf{h}(t) \propto e^{At}$, which decays only when $A < 0$.
+    If $A > 0$, the state would grow exponentially.
+  \item $\Delta_t > 0$ is the time step size.
+  \item $\alpha_t := e^{\Delta_t A_t} \in (0,1)$ is the scalar state-transition.
+  \item $\gamma_t := \Delta_t$ is the discretization factor.
+  \item $\mathbf{B}_t \in \mathbb{R}^{N}$: input projection, $\mathbf{C}_t \in \mathbb{R}^{N}$: output projection, $\mathbf{h}_t \in \mathbb{R}^{N}$: hidden state.
+\end{itemize}
+
+We derive this from the continuous-time state space model (SSM).
+
+\subsection{Continuous-Time SSM}
+
+The underlying continuous-time ordinary differential equation (ODE) is:
+\begin{equation}\label{eq:ode}
+  \dot{\mathbf{h}}(t) = \mathbf{A}(t)\,\mathbf{h}(t) + \mathbf{B}(t)\,x(t),
+  \qquad
+  y(t) = \mathbf{C}(t)^\top\,\mathbf{h}(t)
+\end{equation}
+where $\mathbf{h}(t) \in \mathbb{R}^{N}$, $\mathbf{A}(t) \in \mathbb{R}^{N \times N}$, $\mathbf{B}(t),\,\mathbf{C}(t) \in \mathbb{R}^{N}$, and $x(t),\,y(t) \in \mathbb{R}$.
+This is for a single channel; the multi-channel (MIMO) extension is discussed in Section~\ref{sec:matrix-form}.
+
+\subsection{Continuous-Time Solution (Integrating Factor Method)}
+
+To solve the first-order linear non-homogeneous ODE~\eqref{eq:ode}, we multiply both sides by the integrating factor $\exp\!\bigl(-\int_{0}^{t} \mathbf{A}(\tau)\,d\tau\bigr)$:
+\begin{equation}
+  \exp\!\Bigl(-\!\int_{0}^{t}\!\mathbf{A}(\tau)\,d\tau\Bigr)
+  \biggl[\dot{\mathbf{h}}(t) - \mathbf{A}(t)\,\mathbf{h}(t)\biggr]
+  = \exp\!\Bigl(-\!\int_{0}^{t}\!\mathbf{A}(\tau)\,d\tau\Bigr)\,\mathbf{B}(t)\,x(t)
+\end{equation}
+
+We apply the reverse of the product rule $\frac{d}{dt}(fg) = f'g + fg'$ to the left-hand side:
+\begin{equation}
+  \frac{d}{dt}\biggl[\exp\!\Bigl(-\!\int_{0}^{t}\!\mathbf{A}(\tau)\,d\tau\Bigr)\,\mathbf{h}(t)\biggr]
+  = \exp\!\Bigl(-\!\int_{0}^{t}\!\mathbf{A}(\tau)\,d\tau\Bigr)\,\mathbf{B}(t)\,x(t)
+\end{equation}
+
+Setting the initial state $\mathbf{h}(0)=\mathbf{0}$ and integrating both sides from $0$ to $t$:
+\begin{equation}
+  \exp\!\Bigl(-\!\int_{0}^{t}\!\mathbf{A}(\tau)\,d\tau\Bigr)\,\mathbf{h}(t)
+  - \underbrace{\exp(0)\,\mathbf{h}(0)}_{=\,\mathbf{0}}
+  = \int_{0}^{t}\exp\!\Bigl(-\!\int_{0}^{s}\!\mathbf{A}(\tau)\,d\tau\Bigr)\,\mathbf{B}(s)\,x(s)\,ds
+\end{equation}
+
+Multiplying both sides from the left by $\exp\!\bigl(\int_{0}^{t}\mathbf{A}(\tau)\,d\tau\bigr)$:
+\begin{equation}
+  \mathbf{h}(t) = \exp\!\Bigl(\int_{0}^{t}\!\mathbf{A}(\tau)\,d\tau\Bigr)
+  \int_{0}^{t}\exp\!\Bigl(-\!\int_{0}^{s}\!\mathbf{A}(\tau)\,d\tau\Bigr)\,\mathbf{B}(s)\,x(s)\,ds
+\end{equation}
+
+Since $\exp\!\bigl(\int_{0}^{t}\mathbf{A}\,d\tau\bigr)$ does not depend on~$s$, we bring it inside the integral by linearity.
+Then, because $\mathbf{A}$ is diagonal, $\int_{0}^{t}\mathbf{A}\,d\tau$ and $\int_{0}^{s}\mathbf{A}\,d\tau$ commute, so we can combine the two matrix exponentials via $\exp(\mathbf{M}_1)\exp(\mathbf{M}_2) = \exp(\mathbf{M}_1 + \mathbf{M}_2)$:
+\begin{equation}
+  \mathbf{h}(t) = \int_{0}^{t}\exp\!\Bigl(\int_{0}^{t}\!\mathbf{A}(\tau)\,d\tau - \int_{0}^{s}\!\mathbf{A}(\tau)\,d\tau\Bigr)\,\mathbf{B}(s)\,x(s)\,ds
+\end{equation}
+
+By the linearity of integration $\int_{0}^{t} - \int_{0}^{s} = \int_{s}^{t}$, we obtain the continuous-time general solution:
+\begin{equation}\label{eq:continuous}
+  \mathbf{h}(t) = \int_{0}^{t}
+  \underbrace{\exp\!\Bigl(\int_{s}^{t}\!\mathbf{A}(\tau)\,d\tau\Bigr)}_{\displaystyle\Phi(t,s)}
+  \,\mathbf{B}(s)\,x(s)\,ds
+  \qquad\bigl[\mathbf{h}(t)\in\mathbb{R}^{N}\bigr]
+\end{equation}
+
+\subsection{Discretization}
+
+We derive the state $\mathbf{h}_t$ at time $\tau_t$ by splitting the integration range $[0,\,\tau_t]$ into $[0,\,\tau_{t-1}]$ and $[\tau_{t-1},\,\tau_t]$:
+\begin{equation}
+  \mathbf{h}_t = \int_{0}^{\tau_{t-1}}\!\Phi(\tau_t,s)\,\mathbf{B}(s)\,x(s)\,ds
+           + \int_{\tau_{t-1}}^{\tau_t}\!\Phi(\tau_t,s)\,\mathbf{B}(s)\,x(s)\,ds
+\end{equation}
+
+We apply the semigroup property $\Phi(t,s)=\Phi(t,u)\,\Phi(u,s)$ to the first term:
+\begin{equation}
+  \mathbf{h}_t = \Phi(\tau_t,\tau_{t-1})
+  \underbrace{\int_{0}^{\tau_{t-1}}\!\Phi(\tau_{t-1},s)\,\mathbf{B}(s)\,x(s)\,ds}_{\displaystyle \mathbf{h}_{t-1}}
+  + \int_{\tau_{t-1}}^{\tau_t}\!\Phi(\tau_t,s)\,\mathbf{B}(s)\,x(s)\,ds
+\end{equation}
+
+\paragraph{Right-hand approximation.}\quad
+Following the paper (Section~3.1.1), we approximate $\mathbf{A}(s) \approx \mathbf{A}(\tau_t) =: \mathbf{A}_t$ for all $s \in [\tau_{t-1},\tau_t]$, with $\Delta_t := \tau_t - \tau_{t-1}$. This gives:
+\medskip\noindent\textbf{State-transition.}\quad
+From the definition of $\Phi$ in~\eqref{eq:continuous}:
+\begin{equation}
+  \Phi(\tau_t,\tau_{t-1})
+  = \exp\!\Bigl(\int_{\tau_{t-1}}^{\tau_t}\!\mathbf{A}(s)\,ds\Bigr)
+  \approx \exp\!\Bigl(\int_{\tau_{t-1}}^{\tau_t}\!\mathbf{A}_t\,ds\Bigr)
+  = \exp\bigl(\mathbf{A}_t\,(\tau_t - \tau_{t-1})\bigr)
+  = \exp(\Delta_t\,\mathbf{A}_t)
+\end{equation}
+
+\noindent\textbf{State-input integral.}\quad
+Starting from the second term in~(9), we expand $\Phi(\tau_t,s)$ under the right-hand approximation $\mathbf{A}(s)\approx\mathbf{A}_t$:
+\begin{align}
+  \int_{\tau_{t-1}}^{\tau_t}\!\Phi(\tau_t,s)\,\mathbf{B}(s)\,x(s)\,ds
+  &= \int_{\tau_{t-1}}^{\tau_t}\!\exp\!\Bigl(\int_{s}^{\tau_t}\!\mathbf{A}(\sigma)\,d\sigma\Bigr)\,\mathbf{B}(s)\,x(s)\,ds \notag\\
+  &\approx \int_{\tau_{t-1}}^{\tau_t}\!\exp\bigl((\tau_t{-}s)\,\mathbf{A}_t\bigr)\,\mathbf{B}(s)\,x(s)\,ds
+\end{align}
+Under exponential-Euler, we further hold $\mathbf{B}(s)\approx\mathbf{B}_t$ and $x(s)\approx x_t$:
+\begin{equation}
+  \approx \int_{\tau_{t-1}}^{\tau_t}\!\exp\bigl((\tau_t{-}s)\,\mathbf{A}_t\bigr)\,ds\;\mathbf{B}_t\,x_t
+  \approx \Delta_t\,\mathbf{B}_t\,x_t
+\end{equation}
+
+This yields the general discrete update:
+\begin{equation}\label{eq:discrete-general}
+  \mathbf{h}_t \approx \exp(\Delta_t\,\mathbf{A}_t)\,\mathbf{h}_{t-1} + \Delta_t\,\mathbf{B}_t\,x_t
+\end{equation}
+
+\paragraph{Scalar SSM parameterization.}\quad
+Mamba-2/3 parameterizes $\mathbf{A}_t = A_t\,\mathbf{I}_N$ with $A_t < 0$ (scalar times identity).
+Defining
+\begin{equation}
+  \alpha_t := e^{\Delta_t A_t} \in (0,1), \qquad \gamma_t := \Delta_t
+\end{equation}
+the update~\eqref{eq:discrete-general} becomes:
+\begin{equation}\label{eq:scalar-update}
+  \boxed{\;\mathbf{h}_t = \alpha_t\,\mathbf{h}_{t-1} + \gamma_t\,\mathbf{B}_t\,x_t,
+  \qquad
+  y_t = \mathbf{C}_t^\top\,\mathbf{h}_t\;}
+\end{equation}
+which is the paper's equation~(1). \hfill$\blacksquare$
+
+\subsection{Recursive Unrolling}\label{sec:unrolling}
+
+We unroll the recurrence~\eqref{eq:scalar-update} starting from $\mathbf{h}_0 = \mathbf{0}$.
+
+\medskip\noindent\textbf{Base cases.}\quad
+\begin{align}
+  \mathbf{h}_0 &= \mathbf{0} \notag\\
+  \mathbf{h}_1 &= \alpha_1\,\mathbf{h}_0 + \gamma_1\,\mathbf{B}_1\,x_1
+                 = \gamma_1\,\mathbf{B}_1\,x_1 \notag\\
+  \mathbf{h}_2 &= \alpha_2\,\mathbf{h}_1 + \gamma_2\,\mathbf{B}_2\,x_2
+                 = \alpha_2\,\gamma_1\,\mathbf{B}_1\,x_1
+                   + \gamma_2\,\mathbf{B}_2\,x_2 \notag\\
+  \mathbf{h}_3 &= \alpha_3\,\mathbf{h}_2 + \gamma_3\,\mathbf{B}_3\,x_3
+                 = \alpha_3\alpha_2\,\gamma_1\,\mathbf{B}_1\,x_1
+                   + \alpha_3\,\gamma_2\,\mathbf{B}_2\,x_2
+                   + \gamma_3\,\mathbf{B}_3\,x_3
+\end{align}
+
+\medskip\noindent\textbf{Pattern.}\quad
+Each term indexed by $s$ carries the input $\gamma_s\,\mathbf{B}_s\,x_s$ propagated forward through the product of transition scalars from step $s{+}1$ to $t$.
+Using the paper's cumulative product notation $\alpha_{t:s}^\times := \prod_{j=s}^{t}\alpha_j$ (with $\alpha_{t:t+1}^\times = 1$ when the range is empty):
+\begin{equation}\label{eq:unrolled}
+  \mathbf{h}_t = \sum_{s=1}^{t}\alpha_{t:s+1}^\times\,\gamma_s\,\mathbf{B}_s\,x_s
+\end{equation}
+
+%% ====================================================================
+\section{Derivation of Equation~(2): The Matrix Output Form}\label{sec:matrix-form}
+%% ====================================================================
+
+Using the discrete SSM derived in Section~2, we now derive the matrix output form $\mathbf{Y} = (\mathbf{L}\odot\mathbf{C}\mathbf{B}^\top)\,\mathbf{X}$ (paper equation~2).
+
+\subsection{Output Equation}
+
+The output at time step~$t$ is:
+\begin{equation}\label{eq:output}
+  y_t = \mathbf{C}_t^\top\,\mathbf{h}_t
+\end{equation}
+
+Substituting the unrolled state~\eqref{eq:unrolled}:
+\begin{equation}
+  y_t = \mathbf{C}_t^\top \sum_{s=1}^{t}\alpha_{t:s+1}^\times\,\gamma_s\,\mathbf{B}_s\,x_s
+  = \sum_{s=1}^{t}\alpha_{t:s+1}^\times\,\gamma_s\,(\mathbf{C}_t^\top\mathbf{B}_s)\,x_s
+\end{equation}
+Since $\alpha_t$ is scalar, the cumulative product $\alpha_{t:s+1}^\times$ commutes freely with the vectors.
+
+\subsection{Kernel Factorization}
+
+Define (for $t,s = 1,\dots,T$):
+\begin{itemize}
+  \item Structured mask $\mathbf{L}\in\mathbb{R}^{T\times T}$:\quad
+    $(t,s)$-element $L_{ts}=\alpha_{t:s+1}^\times\,\gamma_s = \bigl(\prod_{j=s+1}^{t}\alpha_j\bigr)\gamma_s$
+    \quad(lower triangular: $L_{ts}=0$ for $s>t$, because the recurrence is causal --- the unrolled sum~\eqref{eq:unrolled} only includes inputs up to time~$t$, so future inputs $x_s$ with $s>t$ have no contribution)
+  \item Projection kernel $\mathbf{C}\mathbf{B}^\top\in\mathbb{R}^{T\times T}$:\quad
+    $(t,s)$-element $(\mathbf{C}\mathbf{B}^\top)_{ts}=\mathbf{C}_t^\top\mathbf{B}_s = \sum_{n=1}^{N}C_{t,n}\,B_{s,n}$
+\end{itemize}
+Note that $\mathbf{L}$ absorbs both the cumulative transition $\alpha_{t:s+1}^\times$ and the discretization factor $\gamma_s$.
+Both $\mathbf{L}$ and $\mathbf{C}\mathbf{B}^\top$ are $T\times T$ matrices (shared across channels).
+
+The output becomes:
+\begin{equation}
+  y_t = \sum_{s=1}^{T}L_{ts}\cdot(\mathbf{C}\mathbf{B}^\top)_{ts}\cdot x_s
+      = \sum_{s=1}^{T}\bigl(\mathbf{L}\odot\mathbf{C}\mathbf{B}^\top\bigr)_{ts}\;x_s
+\end{equation}
+
+\subsection{Multi-Channel (MIMO) Extension}
+
+The recurrence~\eqref{eq:scalar-update} is applied independently to each of $D$ channels with the same $\mathbf{B}_t$, $\mathbf{C}_t$, and $\mathbf{L}$, but potentially different inputs $x_t^{(d)}$.
+Collecting all channels into matrices $\mathbf{X},\mathbf{Y}\in\mathbb{R}^{T\times D}$, the per-channel outputs stack into:
+\begin{equation}\label{eq:main}
+  \boxed{\;\mathbf{Y} = \bigl(\mathbf{L}\odot\mathbf{C}\mathbf{B}^\top\bigr)\,\mathbf{X}\;}
+\end{equation}
+where $(\mathbf{L}\odot\mathbf{C}\mathbf{B}^\top)\in\mathbb{R}^{T\times T}$ is a single matrix applied to all $D$ columns of $\mathbf{X}$.
+
+\hfill$\blacksquare$
+
+\end{document}
