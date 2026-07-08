@@ -6,3 +6,25 @@ __pycache__/
 dist/
 build/
 .pytest_cache/
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.log
+*.toc
+*.out
+*.lof
+*.lot
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.nav
+*.snm
+*.vrb
+*.bcf
+*.run.xml
+
+# Compiled documents (tex output). Keep reference papers under doc/original_paper/.
+*.pdf
+!doc/original_paper/*.pdf
