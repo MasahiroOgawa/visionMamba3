@@ -1389,6 +1389,7 @@ Mask state         & $O(T^2)$ (or banded fused kernel) & $O(ND)$ \\ \hline
 Compute per layer  & $O(T^2(N+D))\cdot k_{\text{scans}}$ & $O(TND)$ \\ \hline
 Per-pair adaptivity & $\bm{L}_{ij}$ and $\bm{C}_i^\top\bm{B}_j$ & $\bm{C}_i^\top\bm{B}_j$ only \\ \hline
 Position encoding   & decay in $|i-j|$ + RoPE   & RoPE only (decay collapses) \\ \hline
+Mamba-3 $\beta$-band & preserved (two-band mask) & does not survive (\S\ref{sec:ncssd-mamba3}) \\ \hline
 Typical regime      & moderate $T$, structure-rich tokens & long $T$, vision-style tokens \\ \hline
 \end{tabular}
 \end{center}
