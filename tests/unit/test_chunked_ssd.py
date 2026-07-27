@@ -111,7 +111,8 @@ def test_module_chunked_matches_full():
         use_fused_kernel=False,
     )
     attn_chunk.load_state_dict(attn_full.state_dict())
-    attn_full.eval(); attn_chunk.eval()
+    attn_full.eval()
+    attn_chunk.eval()
 
     x = torch.randn(2, T, dim)
     with torch.no_grad():
