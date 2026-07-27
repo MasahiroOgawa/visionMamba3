@@ -32,7 +32,7 @@ guessing.
 We summarize the symbols used throughout. The names match
 \cite{mamba3}, Section~2 and Section~3.
 
-\subsection{Sizes}
+\subsection{Sizes}\label{sec:sizes}
 
 \begin{itemize}
   \item $T$: sequence length (number of tokens). For images we will
@@ -41,6 +41,15 @@ We summarize the symbols used throughout. The names match
   \item $D$: model (channel) dimension.
   \item $N$: SSM state dimension (per SSM head).
   \item $R$: MIMO rank (Mamba-3, \S 3.3). For SISO, $R=1$.
+  \item $d_{\text{head}}$: per-head channel width, $d_{\text{head}} =
+        D/(\text{number of heads})$. The channels $D$ are split across
+        several heads that each run their own SSM; the worked examples
+        use $D=384$ over $6$ heads, so $d_{\text{head}}=64$.
+  \item $m, k, n$: \emph{generic placeholder} dimensions used only when
+        pricing the cost of a matrix product $(m\times k)\cdot(k\times
+        n)$, where $k$ is the shared/contracted dimension that is summed
+        over. They are not fixed model sizes: in each cost estimate we
+        instantiate $m,k,n$ from $T$, $N$, and $d_{\text{head}}$.
 \end{itemize}
 
 \subsection{Tokens and projections}
@@ -659,13 +668,76 @@ $D$-dimensional feature; only its content has been re-mixed across the
 1296 tokens, weighted by the structured mask $\bm{L}$.
 
 \paragraph{Cost in this configuration.}
-Materializing the masked inner products costs $O(T^{2}N) =
-1296^{2}\cdot 64 \approx 1.07\!\times\!10^{8}$ multiply-adds per head;
-the value mixing then costs $O(T^{2}d_{\text{head}}) =
-1296^{2}\cdot 64 \approx 1.07\!\times\!10^{8}$ per head. The $T\times
-T$ tensor itself is $1296^{2}\approx 1.68\!\times\!10^{6}$ scalars
-($\sim$\,6.7\,MiB at fp32 per head), which is the term that scales
-quadratically with image side.
+The output \eqref{eq:self-out} involves \emph{four} matrices ---
+$\bm{C}$, $\bm{B}$, $\bm{L}$, and $\bm{V}$ --- combined by three
+operations, but only \emph{two} of them are matrix multiplications:
+\begin{equation*}
+  \bm{Y}_{\text{self}}
+  \;=\;
+  \bigl(\,
+    \underbrace{\bm{L}}_{\text{mask}}
+    \;\odot\;
+    \underbrace{\bm{C}\bm{B}^\top}_{\text{matmul \#1}}
+  \,\bigr)\,
+  \underbrace{\bm{V}}_{\text{matmul \#2 multiplies by this}} .
+\end{equation*}
+The mask $\bm{L}$ does \emph{not} add a matrix multiplication: it enters
+through the Hadamard (element-wise) product $\odot$, which multiplies
+the two $T\times T$ matrices $\bm{L}$ and $\bm{C}\bm{B}^\top$
+entry-by-entry. That touches only the $T^{2}$ entries already present
+and costs $O(T^{2})$ --- negligible beside the two matrix products. So
+the cost is fixed by \textbf{matmul \#1} ($\bm{C}\bm{B}^\top$) and
+\textbf{matmul \#2} (the result times $\bm{V}$).
+
+Both obey the \emph{same} rule of thumb: multiplying an $m\times k$
+matrix by a $k\times n$ matrix costs $m\,k\,n$ multiply-adds, because
+the result has $m\times n$ entries and each entry is a dot product of
+length $k$ ($k$ multiply-adds). Here $m,k,n$ are the generic
+placeholder dimensions of \S\ref{sec:sizes}; we now instantiate them
+for each of the two products.
+
+\medskip
+\noindent\emph{Step A --- form the scores $\bm{C}\bm{B}^\top$.}
+$\bm{C}$ is $T\times N$ and $\bm{B}^\top$ is $N\times T$, so
+$m=T$, $k=N$, $n=T$:
+\begin{equation*}
+  \underbrace{T}_{\text{one row per output token}}\!\times\!
+  \underbrace{N}_{\substack{\text{length of each}\\\text{dot product}}}\!\times\!
+  \underbrace{T}_{\text{one column per input token}}
+  \;=\; T^{2}N .
+\end{equation*}
+In words: the score matrix has one entry for every \emph{pair} of
+tokens, i.e.\ $T\times T = T^{2}$ entries, and computing one entry is a
+dot product between two length-$N$ state vectors $\bm{C}_i,\bm{B}_j$
+($N$ multiply-adds). Hence $T^{2}$ pairs $\times\,N$ each $= T^{2}N$.
+With $T=1296,\ N=64$: $1296^{2}\cdot 64 \approx 1.07\!\times\!10^{8}$
+multiply-adds per head. (The mask multiply $\bm{L}\odot(\cdot)$ only
+rescales the $T^{2}$ entries already computed, so it is a negligible
+$O(T^{2})$.)
+
+\medskip
+\noindent\emph{Step B --- mix the values,
+$(\bm{L}\odot\bm{C}\bm{B}^\top)\bm{V}$.}
+The masked $T\times T$ score matrix multiplies $\bm{V}$, which per head
+is $T\times d_{\text{head}}$, so $m=T$, $k=T$, $n=d_{\text{head}}$:
+\begin{equation*}
+  \underbrace{T}_{\text{output tokens}}\!\times\!
+  \underbrace{T}_{\substack{\text{tokens summed}\\\text{over}}}\!\times\!
+  \underbrace{d_{\text{head}}}_{\text{feature width}}
+  \;=\; T^{2}d_{\text{head}} .
+\end{equation*}
+In words: each of the $T$ output tokens is a weighted sum of all $T$
+value vectors, and each value vector carries $d_{\text{head}}$ numbers,
+giving $T\cdot T\cdot d_{\text{head}}$. Here $d_{\text{head}}=64$, so
+again $1296^{2}\cdot 64 \approx 1.07\!\times\!10^{8}$ per head.
+
+\medskip
+Both steps scale as $T^{2}$, and since $T = HW/P^{2}$ is the number of
+patches, the cost grows with the \emph{square} of the image area --- the
+quadratic term this note is about. Concretely, the $T\times T$ score
+tensor is $1296^{2}\approx 1.68\!\times\!10^{6}$ scalars
+($\sim$\,6.7\,MiB at fp32 per head), the object whose size blows up with
+image side.
 
 \paragraph{Causality on a 2-D grid.}
 $\bm{L}_{ij}=0$ for $j>i$ in \eqref{eq:L2}/\eqref{eq:L3}: a patch in
