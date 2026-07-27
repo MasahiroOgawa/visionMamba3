@@ -13,13 +13,17 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "pytest-xdist"]
+eval = [
+    "pyyaml>=6.0.3",
+    "torchvision>=0.27.1",
+]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/visionmamba3"]
+packages = ["src/visionmamba3", "src/eval"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

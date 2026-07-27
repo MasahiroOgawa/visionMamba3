@@ -1,0 +1,28 @@
+# CIFAR-10 patch1 — long-sequence (T=1025) efficiency test for the Vision
+# Mamba-3 operators. 30 epochs (indicative accuracy, not full convergence).
+# This is the exact recipe that produced the softmax / bidirectional rows of
+# Table 1 in the vmamba3 paper; run it with --variants vit_mamba3_vssd to fill
+# the NC-SSD row.
+#
+#   uv run python -m eval.run_cifar --config src/eval/configs/cifar10_patch1.yaml \
+#       --variants vit_mamba3_vssd
+batch_size: 32
+data_dir: data/cifar10
+device: cuda
+epochs: 30
+grad_clip: 1.0
+lr: 0.0003
+lr_schedule: plateau
+num_workers: 4
+out: result/cifar10_patch1_vssd
+patch_size: 1
+eff_batch: 128
+plateau_factor: 0.5
+plateau_loss_ema_alpha: 0.3
+plateau_min_lr: 1.0e-06
+plateau_patience: 5
+plateau_threshold: 0.001
+seed: 42
+variants:
+  - vit_mamba3_vssd
+warmup_epochs: 10

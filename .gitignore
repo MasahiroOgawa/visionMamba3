@@ -28,3 +28,4 @@ build/
 # Compiled documents (tex output). Keep reference papers under doc/original_paper/.
 *.pdf
 !doc/original_paper/*.pdf
+data/
