@@ -515,12 +515,74 @@ direction.
 Mamba-3 promotes $\bm{A}$ from a real scalar to a block-diagonal
 matrix of $2{\times}2$ rotations
 \begin{equation}\label{eq:Rdef}
-  \bm{R}_t = \mathrm{Block}\bigl(\{R(\Delta_t\bm{\theta}_t[i])\}_{i=1}^{N/2}\bigr),
+  \bm{R}_t = \mathrm{Block}\bigl(\{R(\Delta_t\,\theta_t[i])\}_{i=1}^{N/2}\bigr),
   \qquad
-  R(\phi) = \begin{bmatrix}\cos\phi & -\sin\phi\\ \sin\phi & \cos\phi\end{bmatrix},
+  R(\phi) = \begin{bmatrix}\cos\phi & -\sin\phi\\ \sin\phi & \cos\phi\end{bmatrix}.
 \end{equation}
-and Proposition~4 of \cite{mamba3} shows that this is equivalent
-to applying data-dependent rotary embeddings to $\bm{B}$ and $\bm{C}$.
+
+\paragraph{What $\Delta\theta$ is, and how $\theta$ is computed.}
+Notation first: the \textbf{bold} $\bm{\theta}_t\in\mathbb{R}^{N/2}$ is a
+\emph{vector} holding one \emph{angular frequency} per $2{\times}2$ rotation
+block; the \textbf{non-bold} $\theta_t[i]$ is its $i$-th \emph{scalar} entry
+($i=1,\dots,N/2$). The quantity fed to $R(\cdot)$ in \eqref{eq:Rdef} is the
+per-step angle
+\begin{equation}\label{eq:dtheta}
+  \boxed{\;\Delta\theta_t[i] \;:=\; \Delta_t\,\theta_t[i]\;}
+\end{equation}
+a product of the two \emph{scalars} $\Delta_t$ and $\theta_t[i]$ --- there is no
+inner product. For the whole vector, $\Delta_t$ just scales every entry,
+$\Delta\bm{\theta}_t=\Delta_t\,\bm{\theta}_t$, and $R(\Delta\theta_t[i])$ rotates
+the $i$-th coordinate pair of $\bm{B}_t,\bm{C}_t$ by that scalar angle. (The
+scaling by $\Delta_t$ mirrors the decay discretization $\alpha_t=e^{\Delta_t A_t}$
+of \eqref{eq:abc}: $\Delta_t$ turns a continuous-time rate into a per-step
+amount.)
+
+The one thing \eqref{eq:dtheta} does \emph{not} do is define $\theta$ itself.
+There are two ways to set $\theta$, and \textbf{the image encoder uses the second}:
+
+\smallskip
+\noindent\textbf{(a) General 1-D Mamba-3 --- content-based.} $\bm{\theta}_t$ is
+the imaginary part of the complex state matrix ($A_t+i\,\bm{\theta}_t$), a
+learned projection of the token, $\bm{\theta}_t=\bm{W}_\theta\,\bm{x}_t$
+(\cite{mamba3}, Prop.~2--3). A token's ``position angle'' is then the running sum
+$\Theta_{\le t}[i]=\sum_{s\le t}\Delta_s\,\theta_s[i]$, carried by
+$\bm{R}_{\le t}=\prod_{s\le t}\bm{R}_s^\top$. This is the data-dependent version
+of the Transformer's fixed frequencies $10000^{-2i/N}$.
+
+\smallskip
+\noindent\textbf{(b) Image encoder --- position-based (row and column).} For
+images we want a \emph{spatial} phase, so $\theta$ is built directly from the
+patch's grid position, step by step:
+\begin{enumerate}
+  \item Patchify into an $H_p\times W_p$ grid. The token at cell $(r,c)$ has
+        integer \emph{row} $r\in\{0,\dots,H_p{-}1\}$ and \emph{column}
+        $c\in\{0,\dots,W_p{-}1\}$.
+  \item Fix two frequency vectors
+        $\bm{\theta}^{\text{row}},\bm{\theta}^{\text{col}}\in\mathbb{R}^{N/2}$
+        (learned, or the fixed schedule $10000^{-2i/N}$), one scalar entry per
+        block $i$.
+  \item Form the block-$i$ angle from the row and column
+        (this is \eqref{eq:rope2d}):
+        \begin{equation*}
+          \theta_{r,c}[i]\;=\;\theta^{\text{row}}[i]\,r\;+\;\theta^{\text{col}}[i]\,c
+          \qquad(\text{a scalar, for each } i=1,\dots,N/2).
+        \end{equation*}
+  \item Use it as the \emph{total} angle (no $\Delta_t$ accumulation here): set
+        $\bm{R}_{r,c}=\mathrm{Block}(\{R(\theta_{r,c}[i])\}_i)$ and rotate that
+        patch's key/query, $\widetilde{\bm{B}}_{r,c}=\bm{R}_{r,c}\bm{B}_{r,c}$,
+        $\widetilde{\bm{C}}_{r,c}=\bm{R}_{r,c}\bm{C}_{r,c}$.
+  \item Result: the score between patches $(r,c)$ and $(r',c')$ uses
+        $\widetilde{\bm{C}}_{r,c}^{\top}\widetilde{\bm{B}}_{r',c'}$, whose block
+        $i$ carries $R\bigl(\theta_{r,c}[i]-\theta_{r',c'}[i]\bigr)$ --- so it
+        depends only on the \emph{2-D relative position} $(r{-}r',\,c{-}c')$,
+        which is the point of RoPE.
+\end{enumerate}
+So in the image model $\theta$ \emph{is} the row/column construction of step~3;
+case~(a) is the general mechanism it specialises, and \S\ref{sec:2drope} restates
+this 2-D RoPE in the encoder's context.
+
+Proposition~4 of \cite{mamba3} shows that this rotation view is equivalent
+to applying such data-dependent rotary embeddings to $\bm{B}$ and $\bm{C}$.
 Writing $\bm{R}_{\le t} := \prod_{i=0}^{t}\bm{R}_i^\top$, the complex
 recurrence is
 \begin{equation}\label{eq:complex-rec}
@@ -1076,7 +1138,7 @@ $i,j$: the forward pass covers $j\le i$, the reverse pass covers
 $j\ge i$, and with the diagonal counted twice the bidirectional
 self-attention has no preferred direction.
 
-\subsection{2-D positional encoding via the complex SSM}
+\subsection{2-D positional encoding via the complex SSM}\label{sec:2drope}
 \label{sec:rope2d}
 
 To encode row and column positions, use the RoPE trick of
