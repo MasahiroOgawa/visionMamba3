@@ -793,6 +793,19 @@ value vectors, and each value vector carries $d_{\text{head}}$ numbers,
 giving $T\cdot T\cdot d_{\text{head}}$. Here $d_{\text{head}}=64$, so
 again $1296^{2}\cdot 64 \approx 1.07\!\times\!10^{8}$ per head.
 
+\emph{Why $d_{\text{head}}$ and not the full $D$?} Because attention is
+\textbf{multi-head}. The value matrix is $T\times D$ overall, but its $D=384$
+channels are split into $H=6$ heads of width $d_{\text{head}}=D/H=64$, and each
+head has its \emph{own} score matrix $\bm{L}\odot\bm{C}\bm{B}^\top$ that mixes
+only its own $T\times d_{\text{head}}$ slice of $\bm{V}$ --- hence
+$T^{2}d_{\text{head}}$ \emph{per head} (like Step~A's $T^{2}N$ per head). Summing
+over all $H$ heads restores the full width,
+\begin{equation*}
+  H\cdot T^{2}d_{\text{head}} \;=\; T^{2}\,(H\,d_{\text{head}}) \;=\; T^{2}D ,
+\end{equation*}
+so the per-head $T^{2}d_{\text{head}}$ and the whole-layer $T^{2}D$ are the same
+count, just organised head-by-head.
+
 \medskip
 Both steps scale as $T^{2}$, and since $T = HW/P^{2}$ is the number of
 patches, the cost grows with the \emph{square} of the image area --- the
