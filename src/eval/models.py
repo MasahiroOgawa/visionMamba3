@@ -126,9 +126,13 @@ class Block(nn.Module):
         self.attn = VanillaAttention(dim, num_heads)
         self.norm2 = nn.LayerNorm(dim)
         self.mlp = MLP(dim, int(dim * mlp_ratio))
+        # Set by _swap_mixer when the installed mixer runs column-major scans.
+        self.attn_takes_grid = False
 
-    def forward(self, x: torch.Tensor, pos: torch.Tensor | None = None) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x), pos)
+    def forward(self, x: torch.Tensor, pos: torch.Tensor | None = None,
+                grid: tuple[int, int] | None = None) -> torch.Tensor:
+        kw = {"grid": grid} if self.attn_takes_grid else {}
+        x = x + self.attn(self.norm1(x), pos, **kw)
         x = x + self.mlp(self.norm2(x))
         return x
 
@@ -153,9 +157,10 @@ class ViTTiny(nn.Module):
         # coordinates start at 1 so the CLS token, which has no place on the grid,
         # can hold (0, 0) without colliding with the top-left patch.
         g = img_size // patch
+        self.grid = (g, g)
         rc = torch.arange(g)
-        grid = torch.stack(torch.meshgrid(rc, rc, indexing="ij"), dim=-1).view(-1, 2) + 1
-        token_pos = torch.cat([torch.zeros(1, 2, dtype=grid.dtype), grid])
+        coords = torch.stack(torch.meshgrid(rc, rc, indexing="ij"), dim=-1).view(-1, 2) + 1
+        token_pos = torch.cat([torch.zeros(1, 2, dtype=coords.dtype), coords])
         self.register_buffer("token_pos", token_pos.unsqueeze(0), persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -165,7 +170,7 @@ class ViTTiny(nn.Module):
         x = torch.cat([cls, x], dim=1) + self.pos_embed
         pos = self.token_pos.expand(B, -1, -1)
         for blk in self.blocks:
-            x = blk(x, pos)
+            x = blk(x, pos, grid=self.grid)
         x = self.norm(x)
         return x[:, 0]
 
@@ -197,7 +202,7 @@ def _swap_mixer(vit: ViTTiny, make_mixer) -> int:
 
 def build_model(
     variant: str, patch_size: int = 4, num_classes: int = 10, rope: bool = True,
-    fused: bool = True,
+    fused: bool = True, rope_angles: bool = True, num_directions: int = 4,
 ) -> nn.Module:
     """Build a CIFAR-10 classifier for one operator variant.
 
@@ -213,6 +218,14 @@ def build_model(
     reproduces them); it is on by default because that is the operator the paper
     describes. RoPE2D holds no parameters, so enabling it does not disturb the
     init RNG order that keeps the variants comparable.
+
+    ``rope_angles`` turns on Mamba-3's own complex-SSM rotary (a learned relative
+    encoding inside the operator). It stacks with ``rope``, which is the external
+    absolute 2-D encoding -- both are kept on, since each adds accuracy and they
+    encode different things.
+
+    ``num_directions`` is 2 (row-major forward+reverse) or 4 (adds column-major
+    both ways). NC-SSD ignores it: its mask collapses, so it has no scan order.
 
     ``fused`` selects Mamba3SelfAttention's Triton kernel (NC-SSD never uses it),
     which is both the faster and the reference path's numerical better; keep it on.
@@ -238,10 +251,16 @@ def build_model(
                 dim, num_heads=h, state_dim=64, bidirectional=True,
                 three_term=True, out_proj=True, proj_bias=True, rope=rope_mod,
                 use_fused_kernel=fused, row_renorm=False,
+                rope_angles=rope_angles, num_directions=num_directions,
             ),
         )
+        if num_directions == 4:
+            for blk in model.backbone.blocks:
+                blk.attn_takes_grid = True
         kern = "Triton kernel" if fused else "reference path"
-        print(f"  [vit_mamba3] swapped {n} attention modules -> Mamba3SelfAttention (bidirectional SSD, {tag}, {kern})")
+        ang = "+rotary" if rope_angles else "no rotary"
+        print(f"  [vit_mamba3] swapped {n} attention modules -> Mamba3SelfAttention "
+              f"({num_directions}-dir SSD, {tag}, {ang}, {kern})")
         return model
     if variant == "vit_mamba3_vssd":
         model = Classifier(ViTTiny(patch=patch_size), num_classes)

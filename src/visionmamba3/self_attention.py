@@ -142,6 +142,11 @@ class Mamba3SelfAttention(nn.Module):
                       kernel accumulates as cumsum(Angles*DT). Independent of
                       `rope`: that one is an absolute encoding applied outside,
                       this one is relative and internal to the operator.
+        num_directions: 1 (causal), 2 (row-major forward+reverse, the default) or
+                      4 (adds column-major forward+reverse). A raster scan makes
+                      vertical neighbours T apart in scan order while horizontal
+                      ones are adjacent; the column-major pair restores the other
+                      axis. 4 requires `grid` at call time.
     """
 
     def __init__(
@@ -159,6 +164,7 @@ class Mamba3SelfAttention(nn.Module):
         chunk_size: Optional[int] = None,
         use_fused_kernel: bool = True,
         rope_angles: bool = False,
+        num_directions: int = 2,
     ) -> None:
         super().__init__()
         self.dim = dim
@@ -171,6 +177,11 @@ class Mamba3SelfAttention(nn.Module):
         self.row_renorm = row_renorm
         self.chunk_size = chunk_size
         self.use_fused_kernel = use_fused_kernel
+        if num_directions not in (1, 2, 4):
+            raise ValueError(f"num_directions must be 1, 2 or 4, got {num_directions}")
+        if num_directions == 4 and not bidirectional:
+            raise ValueError("num_directions=4 implies bidirectional=True")
+        self.num_directions = num_directions
 
         self.projections = AttentionProjections(
             dim, num_heads, state_dim, rope_angles=rope_angles
@@ -179,6 +190,14 @@ class Mamba3SelfAttention(nn.Module):
         # tanh(0)=0, so at init the layer behaves as forward-only (reverse noise
         # disabled). Training opens the gate as needed (R2 in PLAN §9).
         self.rev_gate = nn.Parameter(torch.zeros(num_heads)) if bidirectional else None
+        # Column-major forward/backward gates, same zero-init contract as
+        # rev_gate: at init the layer is forward-row-major only, and training
+        # opens each extra direction as it earns it. Kept as a separate
+        # parameter (rather than widening rev_gate) so 2-directional
+        # checkpoints still load.
+        self.col_gates = (
+            nn.Parameter(torch.zeros(2, num_heads)) if num_directions == 4 else None
+        )
         self.post_norm = nn.LayerNorm(dim) if post_norm else nn.Identity()
         self.proj = nn.Linear(dim, dim, bias=proj_bias) if out_proj else nn.Identity()
 
@@ -217,6 +236,47 @@ class Mamba3SelfAttention(nn.Module):
             )
         L = self._build_mask(delta, A_log, lam)
         return ssd_forward(Bp, Cp, Vp, L, row_renorm=self.row_renorm)
+
+    @staticmethod
+    def _column_major_index(grid, T: int, device):
+        """Permutation taking row-major tokens to column-major order, and back.
+
+        Any leading non-grid tokens (a CLS token, registers) are left in place:
+        they have no (row, col) so they cannot be re-ordered, and they must stay
+        at the same index for the residual stream to line up.
+        """
+        h, w = grid
+        n_prefix = T - h * w
+        if n_prefix < 0:
+            raise ValueError(f"grid {grid} needs {h * w} tokens but T={T}")
+        idx = torch.arange(h * w, device=device).view(h, w).t().reshape(-1) + n_prefix
+        if n_prefix:
+            idx = torch.cat([torch.arange(n_prefix, device=device), idx])
+        return idx, torch.argsort(idx)
+
+    def _scan(self, streams, perm=None, inv=None, flip: bool = False) -> Tensor:
+        """One directional SSD pass, returned in the original token order.
+
+        `perm` re-orders tokens before the scan (e.g. into column-major) and
+        `inv` undoes it after; `flip` runs the scan backwards. Every per-token
+        stream has to move together -- reordering B/C/V but not delta/A/lam would
+        silently pair each token's projections with another token's decay.
+        """
+        Bp, Cp, Vp, delta, A_log, lam, angles = streams
+        if perm is not None:
+            Bp, Cp, Vp = Bp[..., perm, :], Cp[..., perm, :], Vp[..., perm, :]
+            delta, A_log, lam = delta[..., perm], A_log[..., perm], lam[..., perm]
+            angles = None if angles is None else angles[..., perm, :]
+        if flip:
+            Bp, Cp, Vp = Bp.flip(-2), Cp.flip(-2), Vp.flip(-2)
+            delta, A_log, lam = delta.flip(-1), A_log.flip(-1), lam.flip(-1)
+            angles = None if angles is None else angles.flip(-2)
+        y = self._one_direction(Bp, Cp, Vp, delta, A_log, lam, angles)
+        if flip:
+            y = y.flip(-2)
+        if inv is not None:
+            y = y[..., inv, :]
+        return y
 
     def _one_direction_kernel(
         self,
@@ -290,11 +350,15 @@ class Mamba3SelfAttention(nn.Module):
         x: Tensor,
         pos: Optional[Tensor] = None,
         attn_mask: Optional[Tensor] = None,
+        grid: Optional[tuple[int, int]] = None,
     ) -> Tensor:
         """
         Args:
             x:         (B, T, D)
             pos:       (B, T, 2) integer 2D positions for RoPE, or None
+            grid:      (H, W) token grid, required when num_directions=4 so the
+                       column-major scans know the 2-D layout. Leading non-grid
+                       tokens (CLS) are allowed and stay in place.
             attn_mask: (B, T, T) additive/boolean mask OR (B, T); True/finite → keep.
                        When provided, zeros-out columns of L before the SSD
                        (so masked tokens don't contribute regardless of decay).
@@ -308,23 +372,23 @@ class Mamba3SelfAttention(nn.Module):
             Bp = self.rope(Bp, pos)
             Cp = self.rope(Cp, pos)
 
-        y = self._one_direction(Bp, Cp, Vp, delta, A_log, lam, angles)
+        streams = (Bp, Cp, Vp, delta, A_log, lam, angles)
+        y = self._scan(streams)
 
         if self.bidirectional:
-            # Reverse along T
-            Bp_r = Bp.flip(dims=(-2,))
-            Cp_r = Cp.flip(dims=(-2,))
-            Vp_r = Vp.flip(dims=(-2,))
-            delta_r = delta.flip(dims=(-1,))
-            A_log_r = A_log.flip(dims=(-1,))
-            lam_r = lam.flip(dims=(-1,))
-            angles_r = None if angles is None else angles.flip(dims=(-2,))
-            y_rev = self._one_direction(
-                Bp_r, Cp_r, Vp_r, delta_r, A_log_r, lam_r, angles_r
-            )
-            y_rev = y_rev.flip(dims=(-2,))
             gate = torch.tanh(self.rev_gate)[None, :, None, None]  # (1, H, 1, 1)
-            y = y + gate * y_rev
+            y = y + gate * self._scan(streams, flip=True)
+
+        if self.num_directions == 4:
+            if grid is None:
+                raise ValueError(
+                    "num_directions=4 needs the token grid: pass grid=(H, W). A "
+                    "column-major scan is undefined on a bare token sequence."
+                )
+            perm, inv = self._column_major_index(grid, T=Bp.shape[-2], device=Bp.device)
+            for k in range(2):
+                gate = torch.tanh(self.col_gates[k])[None, :, None, None]
+                y = y + gate * self._scan(streams, perm=perm, inv=inv, flip=bool(k))
 
         if attn_mask is not None:
             # Token-zero-out semantics: if the row-i column-j is masked, remove

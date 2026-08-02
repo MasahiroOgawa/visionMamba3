@@ -55,7 +55,8 @@ def run_variant(variant: str, args, device: torch.device, train_dl, test_dl) -> 
     print(f"\n=== variant: {variant} ===")
     set_seed(args.seed)
     model = build_model(variant, patch_size=args.patch_size, rope=args.rope,
-                        fused=args.fused).to(device)
+                        fused=args.fused, rope_angles=args.rope_angles,
+                        num_directions=args.num_directions).to(device)
     n_params = count_params(model)
     print(f"  params: {n_params / 1e6:.2f} M ({n_params:,})")
 
@@ -120,6 +121,7 @@ def write_results_json(out: Path, results: dict, args) -> None:
         "lr_schedule": args.lr_schedule, "steps_per_epoch": CIFAR10_TRAIN_N // args.batch_size,
         "patch_size": args.patch_size, "eff_batch": args.eff_batch, "rope": args.rope,
         "fused": args.fused, "amp": args.amp,
+        "rope_angles": args.rope_angles, "num_directions": args.num_directions,
     }
     if args.lr_schedule == "plateau":
         cfg.update({
@@ -163,6 +165,12 @@ def main() -> None:
     ap.add_argument("--rope", action=argparse.BooleanOptionalAction, default=True,
                     help="give the mamba mixers 2-D RoPE on B/C. --no-rope reproduces "
                          "the originally published Table 1 rows, which ran without it.")
+    ap.add_argument("--rope-angles", action=argparse.BooleanOptionalAction, default=True,
+                    help="Mamba-3's own complex-SSM rotary inside the operator. "
+                         "Stacks with --rope, which is the external 2-D encoding.")
+    ap.add_argument("--num-directions", type=int, default=4, choices=[1, 2, 4],
+                    help="SSD scan directions: 2 = row-major fwd+rev, "
+                         "4 = also column-major fwd+rev. NC-SSD ignores this.")
     ap.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True,
                     help="bf16 autocast, used uniformly across every variant. --no-amp "
                          "trains in fp32, for numerical debugging only.")
