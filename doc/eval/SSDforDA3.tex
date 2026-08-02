@@ -221,9 +221,17 @@ The SSM operators' designed advantage is large-$T$ efficiency, not
 small-$T$ accuracy.
 
 %% ================================================================
-\section{ETH3D -- full DA-3 deployment}
+\section{ETH3D -- pose deployment (AUC@30\textdegree)}
 \label{sec:eth3d}
 %% ================================================================
+
+\emph{Two different ETH3D experiments exist in this project and are easy to
+confuse.} This section is the \textbf{camera-pose} one, scored by
+AUC@30\textdegree, and it failed. \S\ref{sec:eth3d-depth} is the
+\textbf{metric-depth} one, scored by abs.\ rel.\ / RMSE / $\log_{10}$ /
+$\delta{<}1.25$, and that is the experiment the paper's depth table reports.
+They use different scene splits, different losses and different metrics, so a
+result from one carries no information about the other.
 
 We swapped the attention modules in DA-3-SMALL ($16$ layers total: 12
 backbone + 4 camera-encoder) and trained with GT-supervised
@@ -305,6 +313,143 @@ under SSD and proposes feature distillation from a frozen teacher
 (\S15.59.5 plan) or recipe changes as the next steps. VSSD's
 recipe-robustness gain alone is not enough to close the gap; the
 init problem is the bottleneck.
+
+%% ================================================================
+\section{ETH3D -- metric depth (the paper's depth table)}
+\label{sec:eth3d-depth}
+%% ================================================================
+
+This is the experiment behind the depth table in the paper. It is separate from
+the pose experiment of \S\ref{sec:eth3d} in every respect: different split,
+different loss, different metrics.
+
+\subsection{Scene split -- what is trained on and what is not}
+\label{sec:eth3d-depth-split}
+
+The split is by \textbf{scene}, fixed, and not random. Of the 11 extracted
+ETH3D scenes that carry ground-truth depth:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Train} (10 scenes, 374 images) &
+  \texttt{courtyard}, \texttt{delivery\_area}, \texttt{electro},
+  \texttt{facade}, \texttt{kicker}, \\
+ & \texttt{office}, \texttt{pipes}, \texttt{playground},
+  \texttt{relief}, \texttt{relief\_2} \\
+\midrule
+\textbf{Held out} (eval only) & \texttt{terrains} (42 views) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent\textbf{\texttt{terrains} is never trained on, in either phase.} Both
+the distillation phase and the depth fine-tune draw only from the 10 training
+scenes; \texttt{terrains} is touched exclusively by the evaluator. Any future
+change to this harness must preserve that, and a run that cannot demonstrate it
+should not be reported.
+
+\subsection{Two-phase protocol}
+\label{sec:eth3d-depth-protocol}
+
+\paragraph{Phase B -- feature distillation (20\,000 steps).}
+The student is DA3-SMALL with its self-attention replaced by Vision Mamba-3;
+everything else is DA3-SMALL's pretrained weights. The teacher is the
+\emph{unmodified} DA3-SMALL, frozen. The loss matches student to teacher
+features (L2 $+$ cosine) at backbone layers $(5,7,9,11)$ of 12,
+$d_{\text{embed}}=384$. Images at $504^2$, batch 1, chunked SSD
+(\texttt{chunk\_size}=128), lr $3\times10^{-4}$. Augmentation: random crop
+0.6--1.0, horizontal flip $p=0.5$, colour jitter $\pm0.4/0.1$.
+
+\paragraph{Phase C -- GT-supervised depth fine-tune (1\,000 steps).}
+Initialised from the Phase-B checkpoint. Loss is SILog (scale-invariant
+log-RMSE) $+$ edge-aware smoothness against ground-truth depth on the 10
+training scenes. Cosine schedule ending near zero LR at step 1000; bf16
+autocast. Learning rates by group:
+\[
+  \text{lr}_{\text{attn}} = 10^{-5}, \qquad
+  \text{lr}_{\text{bridge}} = 3\times10^{-5}, \qquad
+  \text{lr}_{\text{dpt}} = 10^{-5}.
+\]
+
+\noindent\textbf{The DualDPT depth head is unfrozen in Phase C.} This is
+deliberate --- unfreezing it is the single change that produced the result --- but
+it must be stated whenever the numbers are quoted, because it invalidates the
+tempting claim that the head is frozen at DA3-SMALL's own calibration and that
+matching DA3-SMALL is therefore the best achievable outcome by construction.
+That ceiling argument describes an \emph{earlier} recipe, in which the head was
+frozen; it does not describe this one.
+
+\subsection{Evaluation}
+\label{sec:eth3d-depth-eval}
+
+All four metrics are computed on the 42 held-out \texttt{terrains} views, after
+per-image median scale alignment of prediction to ground truth: absolute
+relative depth error, RMSE, $\log_{10}$, and $\delta{<}1.25$ (all except RMSE
+median-aligned; the acceptance gate for RMSE is defined on the raw value).
+
+\paragraph{The baseline is zero-shot.} DA3-SMALL is evaluated off the shelf,
+with no ETH3D training of any kind. Our student has 20\,000 distillation steps
+plus 1\,000 GT-supervised steps on ETH3D's other 10 scenes. This is a
+fine-tuned-versus-zero-shot comparison across disjoint scenes of one dataset ---
+a legitimate transfer setup, and \emph{not} train-on-test --- but it is not a
+like-for-like backbone comparison, and reporting it as one would overstate the
+result. It is the reason our student can lead on $\delta{<}1.25$ while trailing
+on the other three metrics.
+
+\subsection{Reference numbers (legacy run)}
+\label{sec:eth3d-depth-legacy}
+
+The numbers currently in the paper come from the run recorded as CM22@1000 in
+the retired \texttt{largescale3Dreconstruction\_using\_SSM} repository
+(pipeline \texttt{distill\_cm12/ckpt\_20000.pt} $\rightarrow$
+\texttt{depth\_ft\_cm22/ckpt\_1000.pt}, 2026-04-23):
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+ & abs.\ rel.\,$\downarrow$ & RMSE\,$\downarrow$ & $\log_{10}$\,$\downarrow$ & $\delta{<}1.25$\,$\uparrow$ \\
+\midrule
+DA3-SMALL (zero-shot)     & \textbf{0.0417} & \textbf{0.0796} & \textbf{0.0175} & 0.9743 \\
+Vision Mamba-3 (CM22@1000) & 0.0531 & 0.1012 & 0.0229 & \textbf{0.9972} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent These predate the operator update: they were produced \emph{without}
+2-D RoPE and against an older \texttt{mamba-ssm} kernel. They are recorded here
+as the reference to reproduce, not as a current result.
+
+\subsection{What this repository provides}
+\label{sec:eth3d-depth-harness}
+
+The harness is being ported into this repository from the retired repo's
+\texttt{mamba3\_attn} package, so that the experiment is reproducible from a
+single checkout rather than from a repository that no longer exists. The pieces
+and their roles:
+
+\begin{itemize}
+  \item \textbf{DA3 patching} (\texttt{da3\_adapter.py}, \texttt{patch.py}) ---
+        swaps DA3-SMALL's self-attention for the Vision Mamba-3 operator
+        (implementation notes: \texttt{doc/attention/mamba3\_attention.tex}
+        \S8), leaving every other weight at its pretrained value.
+  \item \textbf{ETH3D loaders} (\texttt{data/eth3d.py},
+        \texttt{data/eth3d\_multi.py}) --- scene discovery, GT-depth pairing,
+        and the fixed split of \S\ref{sec:eth3d-depth-split}.
+  \item \textbf{Training phases} (\texttt{train/train\_super.py}) --- Phase B is
+        \texttt{-{}-super 1} (DA3-SMALL teacher), Phase C is
+        \texttt{-{}-super 3 -{}-sub 3} (GT supervision, full unfreeze), matching
+        the recipe of \S\ref{sec:eth3d-depth-protocol}.
+  \item \textbf{Depth metrics} (\texttt{eval/metrics.py}) ---
+        \texttt{abs\_relative\_depth\_error}, \texttt{rmse},
+        \texttt{log10\_metric}, \texttt{delta\_threshold}, and
+        \texttt{align\_scale\_median} for the alignment above.
+\end{itemize}
+
+The operator itself is \emph{not} ported: the patched DA3 uses this
+repository's current \texttt{visionmamba3} modules, so the re-run measures the
+updated operator (2-D RoPE, fused Triton kernel, pinned upstream submodule)
+rather than the 2026-04 snapshot that produced the legacy numbers above.
 
 %% ================================================================
 \section{Conclusion}

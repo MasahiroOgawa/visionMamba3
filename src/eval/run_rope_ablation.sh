@@ -10,17 +10,20 @@
 # silently ignores it, so the constructor default of True would quietly make the
 # reference path a different operator than the kernel one.
 #
-#   bash src/eval/run_rope_ablation.sh
+# Takes the sequence-length tag as $1: patch4 (T=65, default) or patch1 (T=1025).
+#
+#   bash src/eval/run_rope_ablation.sh [patch4|patch1]
 set -euo pipefail
 cd "$(dirname "$0")/../.."   # repo root
 
-cfg=src/eval/configs/cifar10_patch4_rope.yaml
+tag=${1:-patch4}
+cfg=src/eval/configs/cifar10_${tag}_rope.yaml
 
 for arm in rope norope; do
-  out="result/cifar10_patch4_$arm"
+  out="result/cifar10_${tag}_$arm"
   flag=$([ "$arm" = rope ] && echo --rope || echo --no-rope)
   mkdir -p "$out"
-  echo "=== T=65 $arm -> $out  ($(date -Is)) ==="
+  echo "=== $tag $arm -> $out  ($(date -Is)) ==="
   uv run python -m eval.run_cifar --config "$cfg" "$flag" --out "$out" \
       2>&1 | tee "$out/train.log"
 done

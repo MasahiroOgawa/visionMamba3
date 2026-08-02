@@ -1,0 +1,31 @@
+# CIFAR-10 patch1 — long-sequence (T=1025) Table 1 rows, on the fused kernel
+# with 2-D RoPE. Recipe matches the runs that produced the published T=1025 rows
+# (largescale3Dreconstruction_using_SSM/result/cifar10_compare_patch1 for
+# vit_attn 68.4 / vit_mamba3 74.2, and result/cifar10_patch1_vssd for
+# vit_mamba3_vssd 63.9); only rope changes.
+#
+# Run both arms via run_rope_ablation.sh, which sweeps rope/norope: the no-RoPE
+# arm is the control against those published numbers, and the RoPE arm is the
+# replacement. See cifar10_patch4_rope.yaml for why RoPE matters asymmetrically.
+batch_size: 32
+data_dir: data/cifar10
+device: cuda
+epochs: 30
+grad_clip: 1.0
+lr: 0.0003
+lr_schedule: plateau
+num_workers: 4
+out: result/cifar10_patch1_rope
+patch_size: 1
+rope: true
+eff_batch: 128
+plateau_factor: 0.5
+plateau_loss_ema_alpha: 0.3
+plateau_min_lr: 1.0e-06
+plateau_patience: 5
+plateau_threshold: 0.001
+seed: 42
+variants:
+  - vit_mamba3
+  - vit_mamba3_vssd
+warmup_epochs: 10
