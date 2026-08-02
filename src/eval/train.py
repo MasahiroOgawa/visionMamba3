@@ -23,8 +23,8 @@ def set_seed(seed: int) -> None:
     np.random.seed(seed)
 
 
-def autocast_ctx(device: torch.device):
-    if device.type == "cuda":
+def autocast_ctx(device: torch.device, amp: bool = True):
+    if amp and device.type == "cuda":
         return torch.amp.autocast("cuda", dtype=torch.bfloat16)
     return contextlib.nullcontext()
 
@@ -95,7 +95,8 @@ class WarmupPlateauStrategy:
         return self.optimizer.param_groups[0]["lr"]
 
 
-def train_one_epoch(model, loader, optimizer, lr_strategy, device, grad_clip: float = 0.0):
+def train_one_epoch(model, loader, optimizer, lr_strategy, device, grad_clip: float = 0.0,
+                    amp: bool = True):
     model.train()
     total_loss, total_correct, total_n = 0.0, 0, 0
     t0 = time.perf_counter()
@@ -104,7 +105,7 @@ def train_one_epoch(model, loader, optimizer, lr_strategy, device, grad_clip: fl
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
-        with autocast_ctx(device):
+        with autocast_ctx(device, amp):
             logits = model(x)
             loss = F.cross_entropy(logits, y)
         loss.backward()
@@ -126,13 +127,13 @@ def train_one_epoch(model, loader, optimizer, lr_strategy, device, grad_clip: fl
 
 
 @torch.no_grad()
-def evaluate(model, loader, device):
+def evaluate(model, loader, device, amp: bool = True):
     model.eval()
     total_loss, total_correct, total_n = 0.0, 0, 0
     for x, y in loader:
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
-        with autocast_ctx(device):
+        with autocast_ctx(device, amp):
             logits = model(x)
             loss = F.cross_entropy(logits, y)
         bs = y.size(0)

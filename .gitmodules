@@ -1,0 +1,4 @@
+[submodule "third_party/mamba-ssm"]
+	path = third_party/mamba-ssm
+	url = https://github.com/state-spaces/mamba.git
+	branch = main

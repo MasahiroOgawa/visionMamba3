@@ -1,0 +1,37 @@
+# CIFAR-10 patch4 — short-sequence (T=65) Table 1 rows, re-run with 2-D RoPE.
+#
+# Recipe is byte-identical to the run that produced the published T=65 rows
+# (largescale3Dreconstruction_using_SSM/result/cifar10_compare_plateau_with_vssd:
+# cnn 91.8, vit_attn 81.2, vit_mamba3 83.7, vit_mamba3_vssd 75.1). The single
+# change is rope: true.
+#
+# Why re-run: those rows gave the mamba mixers no RoPE, so their only position
+# signal was the ViT's additive learnable pos-embed. That disadvantages NC-SSD
+# specifically -- bidirectional SSD still carries the |i-j| decay mask, a
+# relative-position signal, whereas the NC-SSD collapse leaves RoPE as its only
+# route to relative position. Without this the 83.7-vs-75.1 gap conflates the
+# operator with a missing positional encoding.
+#
+#   uv run python -m eval.run_cifar --config src/eval/configs/cifar10_patch4_rope.yaml
+batch_size: 128
+data_dir: data/cifar10
+device: cuda
+epochs: 80
+grad_clip: 1.0
+lr: 0.0003
+lr_schedule: plateau
+num_workers: 4
+out: result/cifar10_patch4_rope
+patch_size: 4
+rope: true
+eff_batch: 128
+plateau_factor: 0.5
+plateau_loss_ema_alpha: 0.3
+plateau_min_lr: 1.0e-06
+plateau_patience: 5
+plateau_threshold: 0.001
+seed: 42
+variants:
+  - vit_mamba3
+  - vit_mamba3_vssd
+warmup_epochs: 10

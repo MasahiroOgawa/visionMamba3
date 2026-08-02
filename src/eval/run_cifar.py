@@ -54,7 +54,8 @@ def build_lr_strategy(args, optimizer, total_steps: int, warmup_steps: int):
 def run_variant(variant: str, args, device: torch.device, train_dl, test_dl) -> dict:
     print(f"\n=== variant: {variant} ===")
     set_seed(args.seed)
-    model = build_model(variant, patch_size=args.patch_size).to(device)
+    model = build_model(variant, patch_size=args.patch_size, rope=args.rope,
+                        fused=args.fused).to(device)
     n_params = count_params(model)
     print(f"  params: {n_params / 1e6:.2f} M ({n_params:,})")
 
@@ -67,8 +68,9 @@ def run_variant(variant: str, args, device: torch.device, train_dl, test_dl) -> 
     epochs_log: list[dict] = []
     best_acc, best_state = -1.0, None
     for ep in range(1, args.epochs + 1):
-        tr = train_one_epoch(model, train_dl, optimizer, lr_strategy, device, args.grad_clip)
-        ev = evaluate(model, test_dl, device)
+        tr = train_one_epoch(model, train_dl, optimizer, lr_strategy, device, args.grad_clip,
+                             amp=args.amp)
+        ev = evaluate(model, test_dl, device, amp=args.amp)
         lr_strategy.step_per_epoch(tr["loss"])
         epochs_log.append({
             "epoch": ep,
@@ -116,7 +118,8 @@ def write_results_json(out: Path, results: dict, args) -> None:
         "weight_decay": 0.05, "seed": args.seed, "device": args.device,
         "warmup_epochs": args.warmup_epochs, "grad_clip": args.grad_clip,
         "lr_schedule": args.lr_schedule, "steps_per_epoch": CIFAR10_TRAIN_N // args.batch_size,
-        "patch_size": args.patch_size, "eff_batch": args.eff_batch,
+        "patch_size": args.patch_size, "eff_batch": args.eff_batch, "rope": args.rope,
+        "fused": args.fused, "amp": args.amp,
     }
     if args.lr_schedule == "plateau":
         cfg.update({
@@ -157,6 +160,16 @@ def main() -> None:
     ap.add_argument("--data-dir", type=Path, default=Path("data/cifar10"))
     ap.add_argument("--patch-size", type=int, default=1,
                     help="ViT patch side (px): 4->T=65, 2->T=257, 1->T=1025.")
+    ap.add_argument("--rope", action=argparse.BooleanOptionalAction, default=True,
+                    help="give the mamba mixers 2-D RoPE on B/C. --no-rope reproduces "
+                         "the originally published Table 1 rows, which ran without it.")
+    ap.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True,
+                    help="bf16 autocast, used uniformly across every variant. --no-amp "
+                         "trains in fp32, for numerical debugging only.")
+    ap.add_argument("--fused", action=argparse.BooleanOptionalAction, default=True,
+                    help="use the Triton SSD kernel for bidirectional SSD (faster, and "
+                         "what published numbers used). --no-fused runs the equivalent "
+                         "PyTorch path, for CPU runs or kernel debugging.")
     ap.add_argument("--eff-batch", type=int, default=128,
                     help="Batch for the latency/peak-mem probe (128 matches the existing Table 1 rows).")
     ap.add_argument("--warmup-epochs", type=int, default=10)

@@ -141,9 +141,16 @@ def test_kernel_path_runs_and_is_close_to_pytorch():
     weights + inputs is the acceptance threshold.
     """
     import pytest
-    pytest.importorskip("tilelang", reason="fused kernel requires tilelang")
     if not torch.cuda.is_available():
         pytest.skip("kernel path needs CUDA")
+    # Guard on the kernel itself, not on tilelang: visionmamba3 loads mamba_ssm as
+    # a bare namespace package, so the Triton kernels import without the
+    # cute/tilelang backends. Guarding on tilelang skipped this test even when the
+    # kernel was perfectly usable -- which is how a broken kernel went unnoticed.
+    pytest.importorskip(
+        "mamba_ssm.ops.triton.mamba3.mamba3_siso_combined",
+        reason="fused kernel unavailable (is the mamba-ssm submodule checked out?)",
+    )
     torch.manual_seed(0)
     common = dict(
         dim=384, num_heads=6, state_dim=64,

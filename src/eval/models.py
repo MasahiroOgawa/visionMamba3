@@ -24,6 +24,7 @@ import torch.nn.functional as F
 
 # Importing the subpackage triggers visionmamba3/__init__ (mamba-ssm path
 # injection needed by the fused SSD kernel path).
+from visionmamba3.rope2d import RoPE2D
 from visionmamba3.self_attention import Mamba3SelfAttention
 from visionmamba3.vssd_attention import Mamba3VSSDAttention
 
@@ -92,7 +93,8 @@ class VanillaAttention(nn.Module):
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, pos: torch.Tensor | None = None) -> torch.Tensor:
+        del pos  # softmax attention takes position from the additive pos-embed
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
@@ -125,8 +127,8 @@ class Block(nn.Module):
         self.norm2 = nn.LayerNorm(dim)
         self.mlp = MLP(dim, int(dim * mlp_ratio))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x))
+    def forward(self, x: torch.Tensor, pos: torch.Tensor | None = None) -> torch.Tensor:
+        x = x + self.attn(self.norm1(x), pos)
         x = x + self.mlp(self.norm2(x))
         return x
 
@@ -147,14 +149,23 @@ class ViTTiny(nn.Module):
         self.num_heads = num_heads
         nn.init.trunc_normal_(self.cls_token, std=0.02)
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        # (y, x) grid coordinates per token, for mixers that take 2-D RoPE. Patch
+        # coordinates start at 1 so the CLS token, which has no place on the grid,
+        # can hold (0, 0) without colliding with the top-left patch.
+        g = img_size // patch
+        rc = torch.arange(g)
+        grid = torch.stack(torch.meshgrid(rc, rc, indexing="ij"), dim=-1).view(-1, 2) + 1
+        token_pos = torch.cat([torch.zeros(1, 2, dtype=grid.dtype), grid])
+        self.register_buffer("token_pos", token_pos.unsqueeze(0), persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B = x.shape[0]
         x = self.patch_embed(x).flatten(2).transpose(1, 2)
         cls = self.cls_token.expand(B, -1, -1)
         x = torch.cat([cls, x], dim=1) + self.pos_embed
+        pos = self.token_pos.expand(B, -1, -1)
         for blk in self.blocks:
-            x = blk(x)
+            x = blk(x, pos)
         x = self.norm(x)
         return x[:, 0]
 
@@ -184,27 +195,53 @@ def _swap_mixer(vit: ViTTiny, make_mixer) -> int:
     return n
 
 
-def build_model(variant: str, patch_size: int = 4, num_classes: int = 10) -> nn.Module:
+def build_model(
+    variant: str, patch_size: int = 4, num_classes: int = 10, rope: bool = True,
+    fused: bool = True,
+) -> nn.Module:
     """Build a CIFAR-10 classifier for one operator variant.
 
     The mamba mixers use the same kwargs the retired da3_adapter wrappers used:
     ``state_dim=64, out_proj=True, proj_bias=True``; bidirectional SSD keeps
     ``bidirectional=True, three_term=True``; NC-SSD is non-causal (no mask).
+
+    ``rope`` gives the mamba mixers 2-D RoPE on their B/C projections. It matters
+    far more to NC-SSD than to bidirectional SSD: bidirectional keeps the
+    |i-j| decay mask, which is already a relative-position signal, whereas the
+    NC-SSD collapse leaves RoPE as its only source of relative position. The
+    originally published Table 1 rows were run without it (``--no-rope``
+    reproduces them); it is on by default because that is the operator the paper
+    describes. RoPE2D holds no parameters, so enabling it does not disturb the
+    init RNG order that keeps the variants comparable.
+
+    ``fused`` selects Mamba3SelfAttention's Triton kernel (NC-SSD never uses it),
+    which is both the faster and the reference path's numerical better; keep it on.
+    ``--no-fused`` falls back to the equivalent PyTorch path for CPU runs or
+    kernel debugging. Either way we pass ``row_renorm=False``: the kernel silently
+    does not implement row renormalisation, so the constructor default of True
+    would make the two paths compute *different* operators -- a trap worth
+    keeping closed, since published numbers came from the kernel.
     """
     if variant == "cnn":
         return Classifier(SmallResNet(), num_classes)
     if variant == "vit_attn":
         return Classifier(ViTTiny(patch=patch_size), num_classes)
+    # One shared instance: RoPE2D is parameter-free and caches its angle tables
+    # per (dim, max_pos), which every block here hits identically.
+    rope_mod = RoPE2D(base_frequency=100.0) if rope else None
+    tag = "RoPE2D" if rope else "no RoPE"
     if variant == "vit_mamba3":
         model = Classifier(ViTTiny(patch=patch_size), num_classes)
         n = _swap_mixer(
             model.backbone,
             lambda dim, h: Mamba3SelfAttention(
                 dim, num_heads=h, state_dim=64, bidirectional=True,
-                three_term=True, out_proj=True, proj_bias=True,
+                three_term=True, out_proj=True, proj_bias=True, rope=rope_mod,
+                use_fused_kernel=fused, row_renorm=False,
             ),
         )
-        print(f"  [vit_mamba3] swapped {n} attention modules -> Mamba3SelfAttention (bidirectional SSD)")
+        kern = "Triton kernel" if fused else "reference path"
+        print(f"  [vit_mamba3] swapped {n} attention modules -> Mamba3SelfAttention (bidirectional SSD, {tag}, {kern})")
         return model
     if variant == "vit_mamba3_vssd":
         model = Classifier(ViTTiny(patch=patch_size), num_classes)
@@ -212,8 +249,9 @@ def build_model(variant: str, patch_size: int = 4, num_classes: int = 10) -> nn.
             model.backbone,
             lambda dim, h: Mamba3VSSDAttention(
                 dim, num_heads=h, state_dim=64, out_proj=True, proj_bias=True,
+                rope=rope_mod,
             ),
         )
-        print(f"  [vit_mamba3_vssd] swapped {n} attention modules -> Mamba3VSSDAttention (NC-SSD)")
+        print(f"  [vit_mamba3_vssd] swapped {n} attention modules -> Mamba3VSSDAttention (NC-SSD, {tag})")
         return model
     raise ValueError(f"unknown variant: {variant}")
