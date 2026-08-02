@@ -152,6 +152,7 @@ equations is understood to be the post-BCNorm version when the
 algorithm calls for it.
 
 \subsection{Recurrence, parallel form, and decay factors}
+\label{sec:decay}
 
 Mamba-3 uses the \emph{exponential-trapezoidal} discrete recurrence of
 \cite{mamba3} eq.~(5)–(6):
@@ -1169,6 +1170,27 @@ $\widetilde{\bm{C}}_i = \bm{R}_{\le i}\bm{C}_i$ and
 $\widetilde{\bm{B}}_j$ now carry a 2-D rotary position encoding
 inside the SSD inner product \eqref{eq:self-rope}.
 
+In the implementation this rotation is applied to $\bm{B}$ and $\bm{C}$
+\emph{before} they enter the SSD, which makes it uniform across every operator
+in this note: self-attention (\S\ref{sec:self}) rotates both projections by the
+token's own $(r,c)$; cross-attention (\S\ref{sec:cross}) rotates $\bm{C}^q$ by
+the query-side positions and $\bm{B}^{kv}$ by the key-side positions, so
+\eqref{eq:crossB-out} scores a query against a key by their \emph{relative}
+grid offset; NC-SSD (\S\ref{sec:ncssd}) rotates the same two projections even
+though its mask has collapsed. Applying it at the projections rather than inside
+the kernel is what keeps it operator-agnostic --- and it is why the fused kernel
+of \S\ref{sec:impl-kernel} is handed $\text{Angles}=\bm{0}$ to disable its own
+built-in 1-D rotary, which would otherwise rotate twice.
+
+The three operators do not depend on it equally. Bidirectional SSD encodes
+position twice over, once through RoPE and once through the mask's decay in
+$|i-j|$, so it degrades gracefully without RoPE. NC-SSD has no second channel:
+\S\ref{sec:ncssd-mamba3} shows its $T\times T$ mask collapses to a per-token
+scalar that cannot express any $|i-j|$ dependence, leaving RoPE as its
+\emph{only} source of relative position. Omitting RoPE therefore does not
+penalise the two operators equally, and a comparison run without it understates
+NC-SSD specifically (\S\ref{sec:ncssd-when}).
+
 \subsection{Image self-attention layer}
 
 Putting the pieces together, one Mamba-3 self-attention layer for
@@ -1540,6 +1562,15 @@ Mamba-3 $\beta$-band & preserved (two-band mask) & does not survive (\S\ref{sec:
 Typical regime      & moderate $T$, structure-rich tokens & long $T$, vision-style tokens \\ \hline
 \end{tabular}
 \end{center}
+The ``Position encoding'' row deserves emphasis, because it is the row most
+easily lost in an experiment. Bidirectional SSD gets relative position from two
+independent sources and NC-SSD from one, so the two operators are only compared
+fairly when RoPE (\S\ref{sec:rope2d}) is actually enabled. Disable it and
+bidirectional still has the decay band to fall back on while NC-SSD has nothing
+--- the resulting gap measures the missing positional encoding at least as much
+as it measures the operators. Any benchmark table comparing the two should
+therefore record whether RoPE was on.
+
 The two are not mutually exclusive: a hybrid stack can use NC-SSD in
 the early, high-resolution stages where $T$ dominates the cost, and
 bidirectional SSD (or softmax MSA, as in VSSD) in deeper stages where
@@ -1711,6 +1742,96 @@ downstream pipeline is identical. The only practical differences are:
         head, especially Head~B's pyramid, so high-resolution
         segmentation benefits disproportionately from VSSD backbones.
 \end{itemize}
+
+%% ================================================================
+\section{Implementation Notes}
+\label{sec:impl}
+%% ================================================================
+
+The derivations above fix the mathematics; three implementation choices decide
+whether a run actually measures it. All three have gone wrong here in ways that
+raised no error: a stale dependency silently swapped which operator was running,
+a precision ``fix'' silently did nothing, and a constructor default silently
+makes two code paths compute different things. They are recorded here rather
+than left implicit in the code.
+
+\subsection{Numerical precision: bf16 everywhere, fp32 inside the kernel}
+\label{sec:impl-precision}
+
+Every operator runs under \textbf{bf16} autocast, uniformly --- the same dtype
+for softmax attention, bidirectional SSD and NC-SSD, so an accuracy comparison
+between them is not partly a precision comparison. bf16 rather than fp16 is
+deliberate: the decay factors of \S\ref{sec:decay} enter the mask as a
+\emph{cumulative product} $\prod_{k=j+1}^{i}\alpha_k$ along the sequence, which
+for long $T$ ranges over many orders of magnitude. fp16's 5-bit exponent
+underflows there; bf16 keeps fp32's 8-bit exponent and spends its precision
+instead, which is the right trade for this operator.
+
+The fused kernel (\S\ref{sec:impl-kernel}) internally upcasts $\bm{Q},\bm{K},
+\bm{V}$ to fp32 because its accumulators are fp32, and downcasts on the way out.
+That is an internal detail of the same operator, not a departure from the
+uniform bf16 policy.
+
+Two traps are worth stating explicitly.
+\begin{itemize}
+  \item \emph{Casting under autocast does nothing.} Writing \verb|x.float()|
+        inside an autocast region does not give an fp32 matmul: autocast
+        re-downcasts the inputs of every matmul and einsum it governs. Forcing
+        fp32 requires opting the region out with
+        \verb|torch.autocast(..., enabled=False)|. A precision ``fix'' that
+        omits this changes nothing and returns bit-identical numbers --- which
+        is easy to misread as evidence that precision was not the problem.
+  \item \emph{The reference path and the kernel are not automatically the same
+        operator.} The PyTorch fallback honours the \verb|row_renorm| flag while
+        the fused kernel silently ignores it. With the constructor default
+        \verb|row_renorm=True| the two paths therefore compute different things.
+        Pass \verb|row_renorm=False| whenever the two are meant to be compared.
+\end{itemize}
+
+\subsection{Fused Triton kernel}
+\label{sec:impl-kernel}
+
+Bidirectional SSD runs on the upstream Mamba-3 SISO Triton kernel by default: it
+is both faster than the PyTorch reference path and the path any published
+number should be quoted from. The reference path remains for CPU runs and for
+kernel debugging. NC-SSD never uses it --- \eqref{eq:nc-Y} is two einsums, with
+no mask to fuse.
+
+Reaching the kernel needs one piece of plumbing. Upstream's \verb|mamba_ssm|
+package eagerly imports its high-level models from \verb|__init__.py|, and those
+pull in the cute and tilelang backends (\verb|tilelang|, \verb|cutlass|,
+\verb|quack|). Since Python executes a package's \verb|__init__| before any
+submodule, importing the Triton kernel alone would drag in three unrelated
+backends. We instead register \verb|mamba_ssm| as a bare namespace package over
+the upstream directory: every \verb|__init__| between it and
+\verb|ops.triton.mamba3| is empty, so the kernels import while the heavy
+top-level never runs, and those three packages are not dependencies at all.
+
+Note also that the kernel has a built-in 1-D rotary, which we disable by passing
+$\text{Angles}=\bm{0}$; positions are already encoded by the 2-D RoPE applied to
+$\bm{B}$ and $\bm{C}$ upstream of the kernel (\S\ref{sec:rope2d}).
+
+\subsection{Pinning the upstream dependency}
+\label{sec:impl-pinning}
+
+\verb|third_party/mamba-ssm| is a \textbf{git submodule} on official upstream,
+pinned to a specific commit, and it must stay one. We call upstream's kernels
+directly, so its version is part of our numerical definition: two checkouts of
+this repository that disagree on that commit can disagree on results.
+
+This is not hypothetical. The directory was previously a symlink to a shared
+local clone, which drifted onto a branch well behind upstream. On that revision
+the kernel's backward pass raised a dtype error, so \verb|Mamba3SelfAttention|
+fell back to the reference path --- slower, and by \S\ref{sec:impl-precision}
+not even the same operator under the default flags. A previously published
+accuracy number stopped reproducing, and because a symlink records no version,
+nothing in the repository said which upstream revision had produced it. Pointing
+at official upstream's latest \verb|main| fixed the kernel outright.
+
+Practical consequences: bump the pin deliberately and commit it; re-run any
+benchmark whose numbers are still quoted after a bump; and when a measurement
+stops reproducing, check the dependency's log against the date of the
+measurement before suspecting the measurement.
 
 %% ================================================================
 \section{End-to-End Summary}
