@@ -54,6 +54,7 @@ class AttentionProjections(nn.Module):
         num_heads: int,
         state_dim: int = 64,
         bias: bool = False,
+        rope_angles: bool = False,
     ) -> None:
         super().__init__()
         assert dim % num_heads == 0, "dim must be divisible by num_heads"
@@ -61,12 +62,18 @@ class AttentionProjections(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.state_dim = state_dim
+        # Mamba-3's complex-SSM rotary: a learned per-token angle increment per
+        # state channel-pair, shared across heads, matching upstream Mamba3's
+        # `num_rope_angles = split_tensor_size // 2`. Off by default so the
+        # projection keeps its original width and existing checkpoints load.
+        self.num_rope_angles = state_dim // 2 if rope_angles else 0
 
         # One big linear for efficiency; slice the output.
         #   B: H * state_dim
         #   C: H * state_dim
         #   V: H * head_dim = dim
         #   Δ, A, λ: H each (scalar per head per token)
+        #   angles: num_rope_angles (shared across heads), only if enabled
         self.out_size = (
             num_heads * state_dim  # B
             + num_heads * state_dim  # C
@@ -74,8 +81,23 @@ class AttentionProjections(nn.Module):
             + num_heads  # Δ
             + num_heads  # A
             + num_heads  # λ
+            + self.num_rope_angles
         )
         self.proj = nn.Linear(dim, self.out_size, bias=bias)
+
+        if self.num_rope_angles:
+            # Zero-init the angle rows so the rotary is the identity at step 0.
+            # Two reasons. (1) Swapping the rotary into a pretrained model then
+            # starts exactly at the un-rotated model, like the other zero-init
+            # heads here. (2) From a random init the angle increments cumsum over
+            # the sequence into huge rotations that scramble the C.B similarity,
+            # and the kernel's fast cos_approx/sin_approx drift from exact trig
+            # there -- reference-vs-kernel agreement falls from 0.98 to 0.79 at
+            # T=128, and worsens with T.
+            with torch.no_grad():
+                self.proj.weight[-self.num_rope_angles :].zero_()
+                if bias:
+                    self.proj.bias[-self.num_rope_angles :].zero_()
 
         self.bc_norm_b = BCNorm(num_heads, state_dim)
         self.bc_norm_c = BCNorm(num_heads, state_dim)
@@ -88,7 +110,7 @@ class AttentionProjections(nn.Module):
         self.A_bias = nn.Parameter(torch.zeros(num_heads))
         self.lam_bias = nn.Parameter(torch.zeros(num_heads))
 
-    def forward(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    def forward(self, x: Tensor):
         """
         Args:
             x: (B, T, D)
@@ -100,6 +122,8 @@ class AttentionProjections(nn.Module):
             delta:  (B, H, T)              (> 0)
             A_log:  (B, H, T)              (< 0)
             lam:    (B, H, T)              (∈ [0, 1])
+            angles: (B, H, T, N_state/2) rotary angle increments, or None when
+                    `rope_angles=False`. Broadcast across heads, as upstream does.
         """
         B, T, D = x.shape
         H, N, hd = self.num_heads, self.state_dim, self.head_dim
@@ -115,6 +139,10 @@ class AttentionProjections(nn.Module):
         delta_raw = rest[..., :H].transpose(1, 2)  # (B, H, T)
         A_raw = rest[..., H : 2 * H].transpose(1, 2)
         lam_raw = rest[..., 2 * H : 3 * H].transpose(1, 2)
+        angles = None
+        if self.num_rope_angles:
+            angles = rest[..., 3 * H : 3 * H + self.num_rope_angles]  # (B, T, A)
+            angles = angles.unsqueeze(1).expand(-1, H, -1, -1)  # (B, H, T, A)
 
         B_t = self.bc_norm_b(B_raw)
         C_t = self.bc_norm_c(C_raw)
@@ -122,4 +150,4 @@ class AttentionProjections(nn.Module):
         delta = F.softplus(delta_raw + self.delta_bias[None, :, None])
         A_log = -F.softplus(A_raw + self.A_bias[None, :, None])
         lam = torch.sigmoid(lam_raw + self.lam_bias[None, :, None])
-        return B_t, C_t, V_t, delta, A_log, lam
+        return B_t, C_t, V_t, delta, A_log, lam, angles

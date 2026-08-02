@@ -112,7 +112,7 @@ class Mamba3VSSDAttention(nn.Module):
         Returns:
             y: (B, T, D).
         """
-        B_t, C_t, V_t, _delta, A_raw, _lam = self.projections(x)
+        B_t, C_t, V_t, _delta, A_raw, _lam, _angles = self.projections(x)
 
         if self.rope is not None and pos is not None:
             B_t = self.rope(B_t, pos)

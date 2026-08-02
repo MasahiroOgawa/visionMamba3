@@ -24,6 +24,27 @@ from .mask import (
 from .projections import AttentionProjections
 
 
+def apply_cumulative_rope(t: Tensor, theta: Tensor) -> Tensor:
+    """Rotate state-channel pairs of `t` by per-token cumulative angles `theta`.
+
+    This is Mamba-3's complex-SSM rotary written out in PyTorch, and the
+    reference-path twin of what the Triton kernel does internally from its
+    `Angles` argument. Rotating both B and C by their own absolute angle makes
+    the SSD score C_i . B_j depend on the *relative* rotation theta_i - theta_j.
+
+    Args:
+        t:     (B, H, T, N) state projection, N even.
+        theta: (B, H, T, N/2) cumulative angle per channel pair.
+    """
+    # Interleaved pairs (t0,t1), (t2,t3), ... -- matching the kernel, which does
+    # `tl.split(tl.reshape(k, [CHUNK_SIZE, HEADDIM_QK // 2, 2]))`. A half-split
+    # convention silently disagrees with it rather than erroring.
+    pairs = t.unflatten(-1, (t.shape[-1] // 2, 2))
+    t0, t1 = pairs[..., 0], pairs[..., 1]
+    cos, sin = torch.cos(theta), torch.sin(theta)
+    return torch.stack([t0 * cos - t1 * sin, t0 * sin + t1 * cos], dim=-1).flatten(-2)
+
+
 def ssd_forward(
     B: Tensor,
     C: Tensor,
@@ -113,8 +134,14 @@ class Mamba3SelfAttention(nn.Module):
         state_dim:    N_state per head (default 64)
         bidirectional: if True, sum forward and reverse SSD
         three_term:   if True, use Mamba-3 trapezoidal mask; else Mamba-2 two-term
-        rope:         optional module implementing forward(tokens, positions)
+        rope:         optional module implementing forward(tokens, positions),
+                      applied to B/C before the SSD (e.g. 2-D RoPE for images)
         out_proj:     if True, apply a final linear projection (like Attention.proj)
+        rope_angles:  if True, enable Mamba-3's own complex-SSM rotary -- a learned
+                      per-token angle increment per state channel-pair, which the
+                      kernel accumulates as cumsum(Angles*DT). Independent of
+                      `rope`: that one is an absolute encoding applied outside,
+                      this one is relative and internal to the operator.
     """
 
     def __init__(
@@ -131,6 +158,7 @@ class Mamba3SelfAttention(nn.Module):
         post_norm: bool = True,
         chunk_size: Optional[int] = None,
         use_fused_kernel: bool = True,
+        rope_angles: bool = False,
     ) -> None:
         super().__init__()
         self.dim = dim
@@ -144,7 +172,9 @@ class Mamba3SelfAttention(nn.Module):
         self.chunk_size = chunk_size
         self.use_fused_kernel = use_fused_kernel
 
-        self.projections = AttentionProjections(dim, num_heads, state_dim)
+        self.projections = AttentionProjections(
+            dim, num_heads, state_dim, rope_angles=rope_angles
+        )
         # Per-head pre-tanh gate for the reverse SSD stream. Zero-init means
         # tanh(0)=0, so at init the layer behaves as forward-only (reverse noise
         # disabled). Training opens the gate as needed (R2 in PLAN §9).
@@ -165,11 +195,19 @@ class Mamba3SelfAttention(nn.Module):
         delta: Tensor,
         A_log: Tensor,
         lam: Tensor,
+        angles: Optional[Tensor] = None,
     ) -> Tensor:
         # The Triton kernel requires CUDA; fall back to the PyTorch path on
         # CPU so unit tests and ad-hoc CPU runs still work.
         if self.use_fused_kernel and Bp.is_cuda:
-            return self._one_direction_kernel(Bp, Cp, Vp, delta, A_log, lam)
+            return self._one_direction_kernel(Bp, Cp, Vp, delta, A_log, lam, angles)
+        if angles is not None:
+            # Reference-path equivalent of the kernel's internal rotary: it forms
+            # Angles_Cumsum = cumsum(Angles * DT) and rotates B and C by it, so the
+            # C_i . B_j score sees the *relative* rotation between the two tokens.
+            theta = torch.cumsum(angles * delta.unsqueeze(-1), dim=-2)
+            Bp = apply_cumulative_rope(Bp, theta)
+            Cp = apply_cumulative_rope(Cp, theta)
         if self.chunk_size is not None and self.chunk_size < Bp.shape[-2]:
             return ssd_forward_chunked(
                 Bp, Cp, Vp, delta, A_log, lam,
@@ -188,6 +226,7 @@ class Mamba3SelfAttention(nn.Module):
         delta: Tensor,
         A_log: Tensor,
         lam: Tensor,
+        angles: Optional[Tensor] = None,
     ) -> Tensor:
         """Mamba-3 SISO Triton kernel path. State-spaces/mamba >= v2.3.1.
 
@@ -199,9 +238,11 @@ class Mamba3SelfAttention(nn.Module):
             our delta             → kernel DT  (B, H, T)
             our lam (sigmoid)     → kernel Trap(B, H, T)   — λ_t ∈ [0, 1]
 
-        RoPE: our 2D RoPE is applied in `forward` *before* `_one_direction`,
-        so we pass `Angles=zeros` to skip the kernel's internal 1D rotary
-        (Angles=0 ⇒ Angles_Cumsum=0 ⇒ rotation is identity).
+        RoPE: with `rope_angles=True` we hand the kernel the learned per-token
+        angle increments and let it run Mamba-3's own complex-SSM rotary
+        (Angles_Cumsum = cumsum(Angles·DT)). With `rope_angles=False` we pass
+        zeros, making the rotation the identity, for callers that instead apply
+        an external positional encoding to B/C before this point.
 
         `row_renorm` (softmax-like row normalisation) is **not** supported by
         the upstream kernel — it is a SSM-3D-specific design choice that
@@ -228,13 +269,15 @@ class Mamba3SelfAttention(nn.Module):
 
         Q_bias = torch.zeros(H, state_dim, dtype=torch.float32, device=Q.device)
         K_bias = torch.zeros(H, state_dim, dtype=torch.float32, device=K.device)
-        # headdim_angles = state_dim // 2 (rotary's natural half-pair size),
-        # with all-zero angles ⇒ identity rotation (we apply 2D RoPE in `forward`
-        # before this). Avoids the kernel's degenerate `headdim_angles=0` case.
+        # headdim_angles = state_dim // 2, the rotary's natural half-pair size;
+        # also avoids the kernel's degenerate `headdim_angles=0` case.
         headdim_angles = state_dim // 2
-        Angles = torch.zeros(
-            Bsz, T, H, headdim_angles, dtype=torch.float32, device=Q.device,
-        )
+        if angles is None:
+            Angles = torch.zeros(
+                Bsz, T, H, headdim_angles, dtype=torch.float32, device=Q.device,
+            )
+        else:  # (B, H, T, A) -> the kernel's (B, T, H, A)
+            Angles = angles.permute(0, 2, 1, 3).contiguous().float()
 
         out = mamba3_siso_combined(
             Q, K, V, ADT, DT, Trap, Q_bias, K_bias, Angles,
@@ -259,13 +302,13 @@ class Mamba3SelfAttention(nn.Module):
         Returns:
             y: (B, T, D)
         """
-        Bp, Cp, Vp, delta, A_log, lam = self.projections(x)
+        Bp, Cp, Vp, delta, A_log, lam, angles = self.projections(x)
 
         if self.rope is not None and pos is not None:
             Bp = self.rope(Bp, pos)
             Cp = self.rope(Cp, pos)
 
-        y = self._one_direction(Bp, Cp, Vp, delta, A_log, lam)
+        y = self._one_direction(Bp, Cp, Vp, delta, A_log, lam, angles)
 
         if self.bidirectional:
             # Reverse along T
@@ -275,7 +318,10 @@ class Mamba3SelfAttention(nn.Module):
             delta_r = delta.flip(dims=(-1,))
             A_log_r = A_log.flip(dims=(-1,))
             lam_r = lam.flip(dims=(-1,))
-            y_rev = self._one_direction(Bp_r, Cp_r, Vp_r, delta_r, A_log_r, lam_r)
+            angles_r = None if angles is None else angles.flip(dims=(-2,))
+            y_rev = self._one_direction(
+                Bp_r, Cp_r, Vp_r, delta_r, A_log_r, lam_r, angles_r
+            )
             y_rev = y_rev.flip(dims=(-2,))
             gate = torch.tanh(self.rev_gate)[None, :, None, None]  # (1, H, 1, 1)
             y = y + gate * y_rev

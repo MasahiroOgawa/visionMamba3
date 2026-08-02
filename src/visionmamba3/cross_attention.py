@@ -92,8 +92,8 @@ class Mamba3CrossAttention(nn.Module):
         """
         # Queries: we only use C^q and (for variant B) the full decay isn't
         # applied on the query side.
-        _Bq_unused, Cq, _Vq_unused, _dq, _Aq, _lq = self.q_proj(q_tokens)
-        Bkv, Ckv_unused, Vkv, dkv, Akv, _lkv = self.kv_proj(kv_tokens)
+        _Bq_unused, Cq, _Vq_unused, _dq, _Aq, _lq, _angq = self.q_proj(q_tokens)
+        Bkv, Ckv_unused, Vkv, dkv, Akv, _lkv, _angkv = self.kv_proj(kv_tokens)
 
         if rope is not None and q_pos is not None:
             Cq = rope(Cq, q_pos)

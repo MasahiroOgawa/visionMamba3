@@ -10,7 +10,7 @@ from visionmamba3.projections import AttentionProjections, BCNorm
 def test_projections_shapes():
     proj = AttentionProjections(dim=32, num_heads=4, state_dim=8)
     x = torch.randn(2, 10, 32)
-    B_t, C_t, V_t, delta, A_log, lam = proj(x)
+    B_t, C_t, V_t, delta, A_log, lam, _angles = proj(x)
     assert B_t.shape == (2, 4, 10, 8)
     assert C_t.shape == (2, 4, 10, 8)
     assert V_t.shape == (2, 4, 10, 8)  # head_dim = 32/4 = 8
@@ -22,7 +22,7 @@ def test_projections_shapes():
 def test_projection_sign_constraints():
     proj = AttentionProjections(dim=16, num_heads=2, state_dim=4)
     x = torch.randn(3, 20, 16) * 3  # larger scale to stress-test
-    _, _, _, delta, A_log, lam = proj(x)
+    _, _, _, delta, A_log, lam, _angles = proj(x)
     assert torch.all(delta > 0)
     assert torch.all(A_log < 0)
     assert torch.all(lam >= 0) and torch.all(lam <= 1)
@@ -31,7 +31,7 @@ def test_projection_sign_constraints():
 def test_projection_is_differentiable():
     proj = AttentionProjections(dim=16, num_heads=2, state_dim=4)
     x = torch.randn(1, 5, 16, requires_grad=True)
-    B_t, C_t, V_t, delta, A_log, lam = proj(x)
+    B_t, C_t, V_t, delta, A_log, lam, _angles = proj(x)
     loss = B_t.sum() + C_t.sum() + V_t.sum() + delta.sum() + A_log.sum() + lam.sum()
     loss.backward()
     assert x.grad is not None
