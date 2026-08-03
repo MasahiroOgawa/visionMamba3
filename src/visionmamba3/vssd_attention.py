@@ -29,6 +29,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .projections import AttentionProjections
+from .self_attention import apply_cumulative_rope
 
 
 def vssd_forward(B: Tensor, C: Tensor, V: Tensor, m: Tensor) -> Tensor:
@@ -78,6 +79,7 @@ class Mamba3VSSDAttention(nn.Module):
         # so install_mamba3 can pass the same kwargs regardless of variant.
         bidirectional: bool = True,
         three_term: bool = True,
+        rope_angles: bool = False,
         row_renorm: bool = True,
         chunk_size: Optional[int] = None,
         use_fused_kernel: bool = True,
@@ -91,7 +93,9 @@ class Mamba3VSSDAttention(nn.Module):
         self.state_dim = state_dim
         self.rope = rope
 
-        self.projections = AttentionProjections(dim, num_heads, state_dim)
+        self.projections = AttentionProjections(
+            dim, num_heads, state_dim, rope_angles=rope_angles
+        )
         self.post_norm = nn.LayerNorm(dim) if post_norm else nn.Identity()
         self.proj = nn.Linear(dim, dim, bias=proj_bias) if out_proj else nn.Identity()
 
@@ -112,7 +116,18 @@ class Mamba3VSSDAttention(nn.Module):
         Returns:
             y: (B, T, D).
         """
-        B_t, C_t, V_t, _delta, A_raw, _lam, _angles = self.projections(x)
+        B_t, C_t, V_t, _delta, A_raw, _lam, angles = self.projections(x)
+
+        if angles is not None:
+            # Mamba-3's rotary, adapted to NC-SSD. The SSD form accumulates
+            # angle*Delta along the scan, but Delta does not survive the NC
+            # reduction (doc section 6.4), so the increment is unscaled: theta is
+            # a plain cumsum, i.e. position advances one step per token rather
+            # than data-dependently. Rotating B and C alike still makes the
+            # C_i . B_j score depend on the relative angle, which is the point.
+            theta = torch.cumsum(angles, dim=-2)
+            B_t = apply_cumulative_rope(B_t, theta)
+            C_t = apply_cumulative_rope(C_t, theta)
 
         if self.rope is not None and pos is not None:
             B_t = self.rope(B_t, pos)

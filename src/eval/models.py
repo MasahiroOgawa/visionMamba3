@@ -274,9 +274,11 @@ def build_model(
             model.backbone,
             lambda dim, h: Mamba3VSSDAttention(
                 dim, num_heads=h, state_dim=64, out_proj=True, proj_bias=True,
-                rope=rope_mod,
+                rope=rope_mod, rope_angles=rope_angles,
             ),
         )
-        print(f"  [vit_mamba3_vssd] swapped {n} attention modules -> Mamba3VSSDAttention (NC-SSD, {tag})")
+        ang = "+rotary" if rope_angles else "no rotary"
+        print(f"  [vit_mamba3_vssd] swapped {n} attention modules -> "
+              f"Mamba3VSSDAttention (NC-SSD, {tag}, {ang})")
         return model
     raise ValueError(f"unknown variant: {variant}")
