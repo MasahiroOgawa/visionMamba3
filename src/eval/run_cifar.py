@@ -51,9 +51,17 @@ def build_lr_strategy(args, optimizer, total_steps: int, warmup_steps: int):
     return WarmupCosineStrategy(optimizer, total_steps, warmup_steps)
 
 
-def run_variant(variant: str, args, device: torch.device, train_dl, test_dl) -> dict:
+def run_variant(variant: str, args, device: torch.device) -> dict:
     print(f"\n=== variant: {variant} ===")
     set_seed(args.seed)
+    # Loaders are rebuilt per variant, *after* re-seeding, so every variant sees
+    # the same shuffle order. Sharing one DataLoader across the sweep let its
+    # generator state carry over, which made a variant's result depend on how
+    # many variants ran before it -- NC-SSD moved 79.46 -> 78.91 purely from
+    # inserting another variant ahead of it.
+    train_dl, test_dl = make_loaders(
+        args.batch_size, args.data_dir, args.num_workers, device
+    )
     model = build_model(variant, patch_size=args.patch_size, rope=args.rope,
                         fused=args.fused, rope_angles=args.rope_angles).to(device)
     n_params = count_params(model)
@@ -198,11 +206,11 @@ def main() -> None:
         args.epochs = 2
 
     set_seed(args.seed)
-    train_dl, test_dl = make_loaders(args.batch_size, args.data_dir, args.num_workers, device)
-    print(f"[data] CIFAR-10: {len(train_dl.dataset)} train / {len(test_dl.dataset)} test, "
-          f"batch_size={args.batch_size}, steps/epoch={len(train_dl)}")
+    print(f"[data] CIFAR-10: batch_size={args.batch_size}, "
+          f"steps/epoch={CIFAR10_TRAIN_N // args.batch_size} "
+          f"(loaders rebuilt per variant so every variant sees one shuffle order)")
 
-    results = {v: run_variant(v, args, device, train_dl, test_dl) for v in args.variants}
+    results = {v: run_variant(v, args, device) for v in args.variants}
     write_results_json(args.out, results, args)
     print(f"\n[done] artifacts -> {args.out}")
     for v, r in results.items():
