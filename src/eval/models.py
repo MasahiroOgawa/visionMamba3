@@ -7,9 +7,10 @@ skeleton (patch embed, CLS token, learnable pos-embed, pre-norm blocks, head)
 is kept byte-faithful to that harness so the already-published rows reproduce;
 only the token mixer is swapped:
 
-  vit_attn        -> VanillaAttention (softmax)
-  vit_mamba3      -> visionmamba3.Mamba3SelfAttention (bidirectional SSD)
-  vit_mamba3_vssd -> visionmamba3.Mamba3VSSDAttention (NC-SSD, non-causal)
+  vit_attn         -> VanillaAttention (softmax)
+  vit_mamba3       -> Mamba3SelfAttention, 2-directional (row-major fwd+rev)
+  vit_mamba3_4dir  -> Mamba3SelfAttention, 4-directional (+ column-major)
+  vit_mamba3_vssd  -> Mamba3VSSDAttention (NC-SSD, non-causal)
 
 The mamba mixers are built exactly as the retired ``da3_adapter`` wrappers
 built them, and are placed as ``block.attn`` in place of the softmax module,
@@ -28,7 +29,11 @@ from visionmamba3.rope2d import RoPE2D
 from visionmamba3.self_attention import Mamba3SelfAttention
 from visionmamba3.vssd_attention import Mamba3VSSDAttention
 
-VARIANTS = ("cnn", "vit_attn", "vit_mamba3", "vit_mamba3_vssd")
+# The direction count lives in the variant name rather than in a flag: these are
+# separate Table 1 rows, so a run must be able to produce both in one sweep, and
+# the name is then the single source of truth for what a row measured.
+VARIANTS = ("cnn", "vit_attn", "vit_mamba3", "vit_mamba3_4dir", "vit_mamba3_vssd")
+_MAMBA3_DIRECTIONS = {"vit_mamba3": 2, "vit_mamba3_4dir": 4}
 
 
 class BasicBlock(nn.Module):
@@ -202,7 +207,7 @@ def _swap_mixer(vit: ViTTiny, make_mixer) -> int:
 
 def build_model(
     variant: str, patch_size: int = 4, num_classes: int = 10, rope: bool = True,
-    fused: bool = True, rope_angles: bool = True, num_directions: int = 4,
+    fused: bool = True, rope_angles: bool = True,
 ) -> nn.Module:
     """Build a CIFAR-10 classifier for one operator variant.
 
@@ -224,8 +229,8 @@ def build_model(
     absolute 2-D encoding -- both are kept on, since each adds accuracy and they
     encode different things.
 
-    ``num_directions`` is 2 (row-major forward+reverse) or 4 (adds column-major
-    both ways). NC-SSD ignores it: its mask collapses, so it has no scan order.
+    The scan-direction count comes from the variant name (see ``VARIANTS``).
+    NC-SSD has none: its mask collapses, so there is no scan order.
 
     ``fused`` selects Mamba3SelfAttention's Triton kernel (NC-SSD never uses it),
     which is both the faster and the reference path's numerical better; keep it on.
@@ -243,7 +248,8 @@ def build_model(
     # per (dim, max_pos), which every block here hits identically.
     rope_mod = RoPE2D(base_frequency=100.0) if rope else None
     tag = "RoPE2D" if rope else "no RoPE"
-    if variant == "vit_mamba3":
+    if variant in _MAMBA3_DIRECTIONS:
+        num_directions = _MAMBA3_DIRECTIONS[variant]
         model = Classifier(ViTTiny(patch=patch_size), num_classes)
         n = _swap_mixer(
             model.backbone,
@@ -259,7 +265,7 @@ def build_model(
                 blk.attn_takes_grid = True
         kern = "Triton kernel" if fused else "reference path"
         ang = "+rotary" if rope_angles else "no rotary"
-        print(f"  [vit_mamba3] swapped {n} attention modules -> Mamba3SelfAttention "
+        print(f"  [{variant}] swapped {n} attention modules -> Mamba3SelfAttention "
               f"({num_directions}-dir SSD, {tag}, {ang}, {kern})")
         return model
     if variant == "vit_mamba3_vssd":
