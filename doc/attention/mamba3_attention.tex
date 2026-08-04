@@ -1043,7 +1043,7 @@ four scans of Vision-Mamba / V-Mamba realized under the Mamba-3 SSD
 kernel.
 
 %% ================================================================
-\subsection{Vision SSD: the non-causal collapse (NC-SSD / VSSD)}
+\subsection{Vision SSD(\texorpdfstring{$-\gamma$}{-gamma}): the non-causal collapse (NC-SSD / VSSD)}
 \label{sec:ncssd}
 %% ================================================================
 
@@ -1184,11 +1184,16 @@ of NC-SSD:
         summed over $j$.
 \end{itemize}
 The trapezoidal three-term form \eqref{eq:rec3} does \emph{not}
-survive the NC reduction: $\beta_t$ implements a two-band relative
-bias that fundamentally depends on $i,j$ separation, which the
-single-vector $\bm{m}$ cannot represent. VSSD-style NC-SSD is thus
-strictly a Mamba-2-style reduction of Mamba-3 — useful when the
+survive the NC reduction \emph{as constructed here}
+($\beta_t\equiv0$ imposed so that $\bm{L}_{ij}=m_j$ falls out
+directly): $\beta_t$ implements a two-band relative bias that
+fundamentally depends on $i,j$ separation, which this single-vector
+$\bm{m}$ cannot represent. VSSD-style NC-SSD is thus strictly a
+Mamba-2-style reduction of Mamba-3 in this form — useful when the
 mask's expressivity is not needed (Section~\ref{sec:ncssd-when}).
+Section~\ref{sec:ncssd-beta} shows that the causal $\beta$-band is in
+fact recoverable at zero extra cost, and the non-causal one at
+$2\times$ cost via a second pool.
 
 \subsubsection{Tensor-contraction algorithm}\label{sec:ncssd-tensor}
 
@@ -1286,6 +1291,125 @@ cross-view block: each view's NC-SSD hidden state
 $\bm{H}^{(v)}\in\mathbb{R}^{N\times D}$ is already in the form that
 \eqref{eq:crossA-out} consumes, so cross-view attention reduces to
 $\bm{C}^{q\,\top}\sum_v \bm{H}^{(v)}$ with no additional kernel.
+
+%% ================================================================
+\subsection{Vision SSD(\texorpdfstring{$-\beta,\gamma$}{-beta,gamma})}
+\label{sec:ncssd-beta}
+%% ================================================================
+
+Section~\ref{sec:ncssd-mamba3} showed that the single-vector NC-SSD
+collapse, built with $\beta_t\equiv0$, reduces Mamba-3 to a
+Mamba-2-style operator. This section asks a sharper question: can the
+collapse be extended to retain some of the $\beta$-band's capacity
+without giving up NC-SSD's $O(ND)$ state? The answer is yes for the
+causal mask, and yes-with-a-cost for the non-causal one.
+
+\subsubsection{The causal \texorpdfstring{$\bm{L}_3$}{L3} mask is secretly rank-one off the diagonal}
+
+Take \eqref{eq:L3} and factor out the shared cumulative product
+$\bar{\bm{A}}_t := \prod_{k=1}^{t}\alpha_k$ (so
+$\prod_{k=j+1}^{t}\alpha_k = \bar A_t/\bar A_j$):
+\begin{equation}\label{eq:L3-rank1}
+  L_{tj} \;=\; \bar A_t\Bigl(\underbrace{\tfrac{\gamma_j}{\bar A_j}
+  \,+\, \tfrac{\beta_{j+1}}{\bar A_{j+1}}}_{=:\,w_j}\Bigr),
+  \qquad j < t,
+\end{equation}
+with the diagonal handled separately, $L_{tt}=\gamma_t$ (the boundary
+convention $\beta_{T+1}:=0$ of \S\ref{sec:trap} means the ``would-be''
+second term at $j=t$ is exactly zero, so nothing is lost by excluding
+it). Equation~\eqref{eq:L3-rank1} is not an approximation: it is the
+same algebra as \eqref{eq:un-claim}--\eqref{eq:L2}, carried one term
+further. \emph{Both} bands of $\bm{L}_3$ share the identical $t$-side
+factor $\bar A_t$; only the $j$-side factor $w_j$ differs from
+Mamba-2's $\gamma_j/\bar A_j$ by the extra $\beta_{j+1}/\bar A_{j+1}$
+term. In the causal, single-direction case, $\bm{L}_3$ is therefore
+\emph{exactly} as low-rank as $\bm{L}_2$ off the diagonal --- the
+two-band structure of \S\ref{sec:trap} was never a rank obstruction,
+only a bookkeeping one.
+
+Under the NC-SSD reinterpretation ($\alpha_t\equiv1$, so
+$\bar A_t\equiv1$ for all $t$, and $\gamma_j,\beta_{j+1}$ learned
+directly rather than derived from a real decay, as already licensed
+by \S\ref{sec:ncssd}'s practical note on parameterization),
+\eqref{eq:L3-rank1} collapses to
+\begin{equation}\label{eq:m-beta-gamma}
+  m_j \;:=\; \gamma_j + \beta_{j+1},
+\end{equation}
+and the causal output is exactly \eqref{eq:nc-Y} with $\bm{m}$
+replaced by this redefinition --- \emph{no} extra state, \emph{no}
+extra parameters beyond the existing $\beta$ projection. Read
+plainly: Section~\ref{sec:ncssd-mamba3}'s claim that ``$\beta$ does
+not survive'' is correct for the construction used there
+($m_j=1/A_j$, $\beta_t\equiv0$ imposed) but not inevitable --- a
+one-line redefinition of $\bm{m}$ recovers the $\beta$-band's causal
+content at zero extra cost.
+
+\subsubsection{Why the bidirectional collapse needs two pools, not one}
+
+The free lunch ends at \S\ref{sec:bidi}'s reverse pass. Reversing the
+sequence and re-applying \eqref{eq:rec3} is not merely relabeling
+$j<t\leftrightarrow j>t$: the trapezoidal term's shift direction
+flips too. Unrolling the reverse recurrence (the same steps as
+\S\ref{sec:ssd-unroll}, mirrored) gives, in \emph{original} token
+indices,
+\begin{equation}\label{eq:m-beta-gamma-rev}
+  h_i^{\leftarrow} \;=\; \gamma_i Z_i + \sum_{j>i} m'_j Z_j,
+  \qquad m'_j := \gamma_j + \beta_{j-1},
+\end{equation}
+i.e.\ the reverse pass wants $\beta_{j-1}$ where the forward pass
+wanted $\beta_{j+1}$ \eqref{eq:m-beta-gamma}. Summing forward and
+backward and removing the doubled diagonal (as in \eqref{eq:nc-bi}),
+\begin{equation}
+  h_i^{\text{bi}} - \gamma_i Z_i
+  \;=\; \sum_{j<i} m_j Z_j \;+\; \sum_{j>i} m'_j Z_j \;+\; \gamma_i Z_i,
+\end{equation}
+which genuinely depends on $i$ through \emph{which} weight ($m_j$ or
+$m'_j$) token $j$ receives. Unlike the $\gamma$-only case
+\eqref{eq:nc-bi}, the split does not cancel: this is exactly a
+causal-plus-anticausal recurrent pair (ordinary bidirectional SSD,
+\S\ref{sec:bidi}, with its $O(T)$-per-direction state), not a single
+$O(ND)$ global summary. The $\beta$-band's shift structure is what
+breaks the symmetry that lets $\gamma$ alone collapse.
+
+\subsubsection{Vision SSD(\texorpdfstring{$-\beta,\gamma$}{-beta,gamma}): a second, independently-read pool}
+
+The obstruction above is specifically that \emph{both} pools would
+need to be read out through the \emph{same} $\bm{C}_i$: forcing
+$h^{(1)}=\sum_j m_j Z_j$ and $h^{(2)}=\sum_j m'_j Z_j$ through one
+shared query collapses back to a single vector $m_j+m'_j$, by
+linearity, and that sum is exactly the query-independent,
+direction-blind mixture that the previous paragraph shows cannot
+represent the true bidirectional $\beta$-weighting. The fix already
+exists in this document: the MIMO extension of \S\ref{sec:mimo},
+which Section~\ref{sec:ncssd-mamba3} already notes ``carries over by
+replicating \eqref{eq:nc-Y} per head.'' Give the $\beta$-motivated
+pool its \emph{own} query projection $\bm{C}^{(2)}$, independent of
+the $\gamma$-pool's $\bm{C}^{(1)}:=\bm{C}$:
+\begin{equation}\label{eq:vssd-beta-gamma}
+  \boxed{\;\bm{Y} \;=\; \bm{C}^{(1)}\bigl((\bm{B}\odot\bm{m}^{(1)})^\top\bm{X}\bigr)
+        \;+\; \bm{C}^{(2)}\bigl((\bm{B}\odot\bm{m}^{(2)})^\top\bm{X}\bigr),\;}
+\end{equation}
+with $\bm{m}^{(1)}_j := 1/A_j$ unchanged from \eqref{eq:nc-Y} and
+$\bm{m}^{(2)}_j$ a second, freely-learned per-token vector (motivated
+by, but not required to equal, $\beta_{j+1}$ or its non-causal
+reinterpretation). Stacking $\bm{m}^{(1)},\bm{m}^{(2)}$ row-wise gives
+exactly the $2\times L$ matrix this section is named for. Two
+independent state summaries $\bm{H}^{(1)},\bm{H}^{(2)}\in
+\mathbb{R}^{N\times D}$ are needed --- $2\times$ NC-SSD's usual
+$O(ND)$ state and compute, still $O(TND)$ overall, still independent
+of $T$ in memory, and still strictly cheaper than bidirectional SSD's
+$O(T^2(N+D))$ once $T$ is large.
+
+\paragraph{What this is and is not.} Equation~\eqref{eq:vssd-beta-gamma}
+is a motivated \emph{extension}, not a proof that the second head
+recovers Mamba-3's $\beta$-band behaviour --- it gives the operator
+comparable \emph{capacity} (a second, independently-weighted global
+pool) at $2\times$ cost, the same honest caveat that already applies
+to the $\gamma$-only collapse of \S\ref{sec:ncssd}. Whether
+initializing or regularizing $\bm{m}^{(2)}$ toward
+$\beta_{j+1}/\bar A_{j+1}$-like behaviour helps, versus leaving it as
+a free second head, is an open empirical question; neither has been
+implemented or tested in this repository as of this writing.
 
 \subsection{Dimension check}
 \label{sec:dimcheck}
