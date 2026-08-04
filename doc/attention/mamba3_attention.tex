@@ -4,8 +4,13 @@
 \usepackage{array}
 \usepackage{bm}
 \usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black}
 
-\title{Self-Attention and Cross-Attention via Mamba-3, and Their Application to Images}
+\title{Vision Mamba-3: Mamba-3 State-Space Duality as Attention,\\
+       Its Non-Causal Extension to Images, and Four Applications}
 \author{Masahiro Ogawa}
 \date{\today}
 
@@ -13,21 +18,72 @@
 \maketitle
 
 \begin{abstract}
-This note derives, step by step, how the Mamba-3 state space model
-(SSM) can be used as a drop-in replacement for both self-attention and
-cross-attention, and how the resulting attention blocks are assembled
-into an image model. We follow the notation of the original Mamba-3
-paper so every equation can be checked against the source. The
-guiding principle is that every algebraic move is shown with its
-justification. A reader who knows matrix multiplication and
-elementary calculus should be able to follow the whole note without
-guessing.
+This report derives, step by step, how the Mamba-3 state space model (SSM) can be
+used as a drop-in replacement for both self-attention and cross-attention, extends
+the result to images as \emph{Vision Mamba-3}, and measures the resulting operators
+on four tasks. The derivation follows the notation of the original Mamba-3 paper so
+every equation can be checked against the source, and every algebraic move is shown
+with its justification. The structural claim throughout is that the SSD parallel
+form $\bm{Y}=(\bm{L}\odot\bm{C}\bm{B}^\top)\bm{X}$ already has the shape of
+attention, so putting it into a vision pipeline is a relabelling exercise plus a
+mask-builder swap. On top of that we build the image operator: two positional
+encodings (Mamba-3's own complex-SSM rotary, and an external 2-D RoPE applied to
+$\bm{B}$ and $\bm{C}$), two- and four-directional scans, and the non-causal collapse
+(NC-SSD / VSSD) that removes causality without multi-scan. Four applications
+follow --- segmentation-head design, CIFAR-10 classification, ETH3D camera pose, and
+ETH3D metric depth --- each reported with the provenance of its numbers, including
+the two studies whose honest answer is that the operator change alone did not help.
 \end{abstract}
 
 \tableofcontents
 
 %% ================================================================
-\section{Preliminaries and Notation}
+\section{Objective}
+%% ================================================================
+\label{sec:objective}
+
+This report answers three questions about using Mamba-3 as an attention mechanism,
+and keeps them separate because they have different kinds of answer.
+
+\begin{enumerate}
+  \item \textbf{Is the state-space duality literally attention?} This is a question
+        of algebra, and the answer is exact. \S\ref{sec:notation} fixes notation and
+        \S\ref{sec:ssd} derives
+        $\bm{Y}=(\bm{L}\odot\bm{C}\bm{B}^\top)\bm{X}$ from the Mamba-3 recurrence,
+        from which self-attention (\S\ref{sec:self}) and cross-attention
+        (\S\ref{sec:cross}) follow by choosing which tokens supply
+        $\bm{B},\bm{C},\bm{X}$.
+  \item \textbf{What has to change to apply it to images?} An image has no causal
+        order, so the causal mask that makes SSD efficient is exactly what makes it
+        wrong here. \S\ref{sec:images} builds the image operator: where positional
+        information enters (\S\ref{sec:rope}, \S\ref{sec:2drope}), how causality is
+        removed either by scanning in several directions (\S\ref{sec:bidi},
+        \S\ref{sec:4dir}) or by collapsing the mask outright (\S\ref{sec:ncssd}),
+        what the tensor shapes actually are (\S\ref{sec:dimcheck}), and what the
+        implementation commits to (\S\ref{sec:impl}).
+  \item \textbf{Does it work on real tasks?} This is a question of measurement, and
+        the answer is mixed. Four studies follow: segmentation-head design
+        (\S\ref{sec:app-seg}), CIFAR-10 classification (\S\ref{sec:cifar}), ETH3D
+        camera pose (\S\ref{sec:eth3d}), and ETH3D metric depth
+        (\S\ref{sec:eth3d-depth}).
+\end{enumerate}
+
+\paragraph{On reading the measured numbers.} The derivations in
+\S\ref{sec:notation}--\S\ref{sec:images} are checkable against \cite{mamba3} and do
+not depend on any run. The numbers in \S\ref{sec:cifar}--\S\ref{sec:eth3d-depth} do,
+and they were not all produced by the same version of the operator: 2-D RoPE, the
+fused Triton kernel, and the pinned upstream submodule (\S\ref{sec:impl}) all landed
+after some of the runs reported here. Where that is true it is stated at the table
+rather than left for the reader to infer, because two of these tables disagree with
+each other and the reason is provenance, not noise. Two results are negative and are
+reported as such: on CIFAR-10 no state-space variant beats a small CNN at this data
+scale, and on ETH3D pose both variants fail to beat un-patched zero-shot DA-3.
+
+%% ================================================================
+%% ================================================================
+%% ================================================================
+\section{Notation}
+\label{sec:notation}
 %% ================================================================
 
 We summarize the symbols used throughout. The names match
@@ -216,7 +272,9 @@ Using only the objects above, we will:
 \end{enumerate}
 
 %% ================================================================
-\section{Why SSD $\equiv$ linear attention (the duality, derived)}
+%% ================================================================
+%% ================================================================
+\section{State-Space Duality}
 \label{sec:ssd}
 %% ================================================================
 
@@ -224,7 +282,45 @@ We derive \eqref{eq:ssd} directly from the recurrence. Work entirely
 with the two-term form \eqref{eq:rec2} first; the three-term form
 \eqref{eq:rec3} is a corollary (\S\ref{sec:trap}).
 
+%% ================================================================
+\subsection{SSD is already attention (the result up front)}
+%% ================================================================
+
+The Structured State-space Duality (Dao~\&~Gu 2024; Lahoti et al.\
+2026) shows that the Mamba SSD parallel form and softmax attention
+share an output shape:
+\begin{equation}\label{eq:duality}
+  \underbrace{\bm{Y} = \bigl(\bm{L}\odot\bm{C}\bm{B}^\top\bigr)\bm{V}}_{\text{Mamba SSD (2 or 3)}}
+  \qquad\Longleftrightarrow\qquad
+  \underbrace{\bm{Y} = \mathrm{softmax}\!\bigl(\bm{Q}\bm{K}^\top/\sqrt{d}\bigr)\bm{V}}_{\text{softmax attention}}.
+\end{equation}
+Matching by shape gives the substitution
+\[
+  \bm{Q} \leftarrow \bm{C},\qquad
+  \bm{K} \leftarrow \bm{B},\qquad
+  \bm{V} \leftarrow \mathrm{SiLU}(\bm{W}_V\bm{x}),
+\]
+i.e.\ query and key projections are the SSD $\bm{C}$ and $\bm{B}$
+streams; the value projection is the same learned $\bm{W}_V$ that
+softmax attention uses (this is shared with Mamba-2; Mamba-3 only
+changes the structure of $\bm{L}$). The only structural difference
+from softmax attention is that the row-wise normalisation
+$\mathrm{softmax}(\cdot/\sqrt{d})$ is replaced by an element-wise
+multiplication by the learned, structured mask $\bm{L}$.
+
+For Mamba-3 the trapezoidal three-term recurrence introduces a richer
+$\bm{L}$ (two contributions per $(t,j)$ cell), but does not change the
+shape of \eqref{eq:duality}. For the \emph{non-causal} variant
+(VSSD, Shi et al.\ 2025), the $T\times T$ mask collapses to a
+$T$-vector $\bm{m}$ and the formula simplifies further to
+\begin{equation}\label{eq:vssd}
+  \bm{Y} \;=\; \bm{C}\,\bigl((\bm{B}\odot\bm{m})^\top\bm{X}\bigr),
+\end{equation}
+a single global $N\times d$ hidden state, no mask materialization.
+The derivation is \S\ref{sec:ssd-unroll}--\S\ref{sec:trap} below.
+
 \subsection{Unrolling the two-term recurrence}
+\label{sec:ssd-unroll}
 
 Starting from $\bm{h}_0 = \bm{0}$ and applying \eqref{eq:rec2} once:
 \begin{equation}\label{eq:un1}
@@ -284,7 +380,7 @@ The key observation is that $\bm{x}_j$ is a vector while
 $\bm{C}_t^\top\bm{B}_j$ is a scalar; we are free to reorder the
 factors.
 
-\subsection{Matrix form: $\bm{Y} = (\bm{L}\odot \bm{C}\bm{B}^\top)\bm{X}$}
+\subsection{Matrix form: \texorpdfstring{$\bm{Y} = (\bm{L}\odot \bm{C}\bm{B}^\top)\bm{X}$}{Y = (L .* C B-transpose) X}}
 
 Define the lower-triangular matrix
 \begin{equation}\label{eq:L2}
@@ -394,7 +490,9 @@ test $\lambda_t\equiv 1$ (which zeroes $\beta$ identically) and must
 therefore be caught by an independent test with $\lambda_t \in (0,1)$.
 
 %% ================================================================
-\section{Self-Attention via Mamba-3}
+%% ================================================================
+%% ================================================================
+\section{Mamba-3 Self-Attention}
 \label{sec:self}
 %% ================================================================
 
@@ -511,105 +609,6 @@ $i$ sees tokens $1,\dots,i$. We remove this causality in
 Section~\ref{sec:images} by running a second pass in the reverse
 direction.
 
-\subsection{Complex-valued SSM / RoPE trick: attention with learned RoPE}
-\label{sec:rope}
-
-Mamba-3 promotes $\bm{A}$ from a real scalar to a block-diagonal
-matrix of $2{\times}2$ rotations
-\begin{equation}\label{eq:Rdef}
-  \bm{R}_t = \mathrm{Block}\bigl(\{R(\Delta_t\,\theta_t[i])\}_{i=1}^{N/2}\bigr),
-  \qquad
-  R(\phi) = \begin{bmatrix}\cos\phi & -\sin\phi\\ \sin\phi & \cos\phi\end{bmatrix}.
-\end{equation}
-
-\paragraph{What $\Delta\theta$ is, and how $\theta$ is computed.}
-Notation first: the \textbf{bold} $\bm{\theta}_t\in\mathbb{R}^{N/2}$ is a
-\emph{vector} holding one \emph{angular frequency} per $2{\times}2$ rotation
-block; the \textbf{non-bold} $\theta_t[i]$ is its $i$-th \emph{scalar} entry
-($i=1,\dots,N/2$). The quantity fed to $R(\cdot)$ in \eqref{eq:Rdef} is the
-per-step angle
-\begin{equation}\label{eq:dtheta}
-  \boxed{\;\Delta\theta_t[i] \;:=\; \Delta_t\,\theta_t[i]\;}
-\end{equation}
-a product of the two \emph{scalars} $\Delta_t$ and $\theta_t[i]$ --- there is no
-inner product. For the whole vector, $\Delta_t$ just scales every entry,
-$\Delta\bm{\theta}_t=\Delta_t\,\bm{\theta}_t$, and $R(\Delta\theta_t[i])$ rotates
-the $i$-th coordinate pair of $\bm{B}_t,\bm{C}_t$ by that scalar angle. (The
-scaling by $\Delta_t$ mirrors the decay discretization $\alpha_t=e^{\Delta_t A_t}$
-of \eqref{eq:abc}: $\Delta_t$ turns a continuous-time rate into a per-step
-amount.)
-
-The one thing \eqref{eq:dtheta} does \emph{not} do is define $\theta$ itself.
-There are two ways to set $\theta$, and \textbf{the image encoder uses the second}:
-
-\smallskip
-\noindent\textbf{(a) General 1-D Mamba-3 --- content-based.} $\bm{\theta}_t$ is
-the imaginary part of the complex state matrix ($A_t+i\,\bm{\theta}_t$), a
-learned projection of the token, $\bm{\theta}_t=\bm{W}_\theta\,\bm{x}_t$
-(\cite{mamba3}, Prop.~2--3). A token's ``position angle'' is then the running sum
-$\Theta_{\le t}[i]=\sum_{s\le t}\Delta_s\,\theta_s[i]$, carried by
-$\bm{R}_{\le t}=\prod_{s\le t}\bm{R}_s^\top$. This is the data-dependent version
-of the Transformer's fixed frequencies $10000^{-2i/N}$.
-
-\smallskip
-\noindent\textbf{(b) Image encoder --- position-based (row and column).} For
-images we want a \emph{spatial} phase, so $\theta$ is built directly from the
-patch's grid position, step by step:
-\begin{enumerate}
-  \item Patchify into an $H_p\times W_p$ grid. The token at cell $(r,c)$ has
-        integer \emph{row} $r\in\{0,\dots,H_p{-}1\}$ and \emph{column}
-        $c\in\{0,\dots,W_p{-}1\}$.
-  \item Fix two frequency vectors
-        $\bm{\theta}^{\text{row}},\bm{\theta}^{\text{col}}\in\mathbb{R}^{N/2}$
-        (learned, or the fixed schedule $10000^{-2i/N}$), one scalar entry per
-        block $i$.
-  \item Form the block-$i$ angle from the row and column
-        (this is \eqref{eq:rope2d}):
-        \begin{equation*}
-          \theta_{r,c}[i]\;=\;\theta^{\text{row}}[i]\,r\;+\;\theta^{\text{col}}[i]\,c
-          \qquad(\text{a scalar, for each } i=1,\dots,N/2).
-        \end{equation*}
-  \item Use it as the \emph{total} angle (no $\Delta_t$ accumulation here): set
-        $\bm{R}_{r,c}=\mathrm{Block}(\{R(\theta_{r,c}[i])\}_i)$ and rotate that
-        patch's key/query, $\widetilde{\bm{B}}_{r,c}=\bm{R}_{r,c}\bm{B}_{r,c}$,
-        $\widetilde{\bm{C}}_{r,c}=\bm{R}_{r,c}\bm{C}_{r,c}$.
-  \item Result: the score between patches $(r,c)$ and $(r',c')$ uses
-        $\widetilde{\bm{C}}_{r,c}^{\top}\widetilde{\bm{B}}_{r',c'}$, whose block
-        $i$ carries $R\bigl(\theta_{r,c}[i]-\theta_{r',c'}[i]\bigr)$ --- so it
-        depends only on the \emph{2-D relative position} $(r{-}r',\,c{-}c')$,
-        which is the point of RoPE.
-\end{enumerate}
-So in the image model $\theta$ \emph{is} the row/column construction of step~3;
-case~(a) is the general mechanism it specialises, and \S\ref{sec:2drope} restates
-this 2-D RoPE in the encoder's context.
-
-Proposition~4 of \cite{mamba3} shows that this rotation view is equivalent
-to applying such data-dependent rotary embeddings to $\bm{B}$ and $\bm{C}$.
-Writing $\bm{R}_{\le t} := \prod_{i=0}^{t}\bm{R}_i^\top$, the complex
-recurrence is
-\begin{equation}\label{eq:complex-rec}
-  \bm{h}_t = \alpha_t\,\bm{h}_{t-1}
-            + \beta_t\,\bm{R}_{\le t-1}\,\bm{B}_{t-1}\,\bm{x}_{t-1}
-            + \gamma_t\,\bm{R}_{\le t}\,\bm{B}_{t}\,\bm{x}_{t},
-\qquad
-  \bm{y}_t = (\bm{R}_{\le t}\,\bm{C}_t)^\top\,\bm{h}_t.
-\end{equation}
-Following the same unrolling as in Section~\ref{sec:ssd}, the
-analogue of \eqref{eq:self-entry} becomes
-\begin{equation}\label{eq:self-rope}
-  \bm{y}_i^{\text{self}}
-     \;=\; \sum_{j=1}^{i} L_{ij}\,
-            \bigl(\widetilde{\bm{C}}_i^{\,\top}\widetilde{\bm{B}}_j\bigr)\,\bm{v}_j,
-  \qquad
-  \widetilde{\bm{C}}_i := \bm{R}_{\le i}\,\bm{C}_i,\quad
-  \widetilde{\bm{B}}_j := \bm{R}_{\le j}\,\bm{B}_j.
-\end{equation}
-That is, \textbf{Mamba-3 self-attention is linear attention with a
-structured mask $\bm{L}$ and a \emph{data-dependent} rotary embedding}
-applied to the $\bm{B}$ (key) and $\bm{C}$ (query) projections,
-exactly the Transformer's RoPE but with angles learned per token
-rather than fixed to $10000^{-2i/N}$.
-
 \subsection{MIMO extension}\label{sec:mimo}
 
 Mamba-3's MIMO variant (\cite{mamba3} \S 3.3, eqs.~(12)–(14))
@@ -628,204 +627,10 @@ each, the MIMO self-attention output is
 \end{equation}
 This is exactly multi-head linear attention with shared mask.
 
-\subsection{Worked example: self-attention on one $504\!\times\!504$ image}
-\label{sec:self-worked}
-
-To make the shapes concrete, apply \eqref{eq:self-out} to a single RGB
-image $\bm{I}\in\mathbb{R}^{504\times 504\times 3}$ with patch size
-$P=14$ and feature width $D=384$, split across $H=6$ heads
-($d_{\text{head}}=64$) with state dimension $N=64$. No special tokens,
-no multi-view assembly — just the operator on one image.
-
-\paragraph{From pixels to tokens.}
-The 504$\times$504 RGB image is sliced into non-overlapping
-$14\!\times\!14$ patches by a single strided convolution
-(\emph{patch embedding}), giving a $36\!\times\!36$ grid of
-patch-tokens. Each patch is then mapped to a $D$-dim feature vector
-by exactly the linear map of \eqref{eq:patch-embed}; we make every
-step concrete here.
-
-\medskip
-\noindent\emph{Step 1 — slice the image into patches.}
-Index the patch grid by $(r, c)$ with $r, c \in \{1, \dots, 36\}$.
-The $(r, c)$-th patch is the $14\!\times\!14\!\times\!3$ block
-\begin{equation}
-  \bm{P}_{r,c} \;\in\; \mathbb{R}^{14\times 14\times 3},
-  \qquad
-  \bm{P}_{r,c}[i, j, k] \;=\; \bm{I}\bigl[14(r{-}1){+}i,\; 14(c{-}1){+}j,\; k\bigr].
-\end{equation}
-Flatten its three colour planes into one vector (row-major over
-height, width, channel):
-\begin{equation}
-  \bm{p}_{r,c} \;:=\; \mathrm{vec}(\bm{P}_{r,c})
-   \;\in\; \mathbb{R}^{14 \cdot 14 \cdot 3} \;=\; \mathbb{R}^{588}.
-\end{equation}
-Each pixel of the patch contributes 3 scalars (one per RGB channel),
-so a patch is a $588$-dim vector of raw pixel intensities (typically
-each rescaled to $[0, 1]$ and then ImageNet-normalised).
-
-\medskip
-\noindent\emph{Step 2 — project each patch to a $D$-dim feature.}
-A single learned linear map (the patch-embedding weight) is shared
-across all $1296$ patches:
-\begin{equation}\label{eq:self-worked-embed}
-  \bm{x}_{r,c}
-   \;=\; \bm{W}_{\text{emb}}\,\bm{p}_{r,c} \;+\; \bm{b}_{\text{emb}}
-   \;\in\;\mathbb{R}^{D} = \mathbb{R}^{384},
-  \qquad
-  \bm{W}_{\text{emb}}\in\mathbb{R}^{384\times 588},
-  \quad
-  \bm{b}_{\text{emb}}\in\mathbb{R}^{384}.
-\end{equation}
-This is \eqref{eq:patch-embed} applied to our concrete numbers. Implemented as
-a $\mathrm{Conv2d}(3{\to}D, \text{kernel}{=}14, \text{stride}{=}14)$
-on the image, it does the slice and the linear map in one pass —
-mathematically identical to the per-patch formula above. The total
-parameter count of this layer is $D \cdot 14\!\cdot\!14\!\cdot\!3 + D
-= 384 \cdot 588 + 384 = 226\,176$ weights, shared across every patch
-position; learning adjusts $\bm{W}_{\text{emb}}$ so that the
-$D$-dim output discriminates whatever the downstream loss requires
-(class identity, depth, semantic mask, etc.).
-
-\medskip
-\noindent\emph{Step 3 — flatten the patch grid to a token sequence.}
-Read the $36\!\times\!36$ grid in row-major order to produce a length-$T$
-sequence:
-\begin{equation}
-  \bm{x}_t \;:=\; \bm{x}_{r,c},\quad t \;=\; 36(r{-}1) + c,\quad t = 1, \dots, T,
-  \qquad
-  T = 36 \cdot 36 = 1296.
-\end{equation}
-Stacking the $T$ rows gives the token matrix consumed by the
-attention layer:
-\begin{equation}
-  \bm{X}\;=\;(\bm{x}_1, \dots, \bm{x}_T)^\top
-   \;\in\; \mathbb{R}^{T \times D} \;=\; \mathbb{R}^{1296 \times 384}.
-\end{equation}
-The attention layer never sees pixels — it sees these $1296$ token
-vectors, each of dimension $D = 384$. Every subsequent
-operation in this worked example (projections to $\bm{B}, \bm{C},
-\bm{V}$, the masked inner product, etc.) treats $\bm{X}$ as its
-input matrix, with no further reference to the original
-$504\!\times\!504$ pixel grid.
-
-\paragraph{What the layer computes.}
-The per-token projections \eqref{eq:projB}, \eqref{eq:projC},
-\eqref{eq:projV}, \eqref{eq:projA} produce
-\begin{equation}
-  \bm{B},\bm{C}\in\mathbb{R}^{T\times N}=\mathbb{R}^{1296\times 64},
-  \quad
-  \bm{V}\in\mathbb{R}^{T\times D}=\mathbb{R}^{1296\times 384},
-  \quad
-  \bm{L}\in\mathbb{R}^{T\times T}=\mathbb{R}^{1296\times 1296},
-\end{equation}
-where $\bm{V} = (\bm{v}_1,\dots,\bm{v}_T)^\top$ collects the
-value-projected rows $\bm{v}_t = \mathrm{SiLU}(\bm{W}_V\bm{x}_t)$.
-The output is
-\begin{equation}
-  \bm{Y}_{\text{self}}
-   \;=\; \bigl(\bm{L}\odot\bm{C}\bm{B}^\top\bigr)\bm{V}
-   \;\in\;\mathbb{R}^{T\times D}=\mathbb{R}^{1296\times 384}.
-\end{equation}
-\emph{Output shape equals input shape}: every patch still has a single
-$D$-dimensional feature; only its content has been re-mixed across the
-1296 tokens, weighted by the structured mask $\bm{L}$.
-
-\paragraph{Cost in this configuration.}
-The output \eqref{eq:self-out} involves \emph{four} matrices ---
-$\bm{C}$, $\bm{B}$, $\bm{L}$, and $\bm{V}$ --- combined by three
-operations, but only \emph{two} of them are matrix multiplications:
-\begin{equation*}
-  \bm{Y}_{\text{self}}
-  \;=\;
-  \bigl(\,
-    \underbrace{\bm{L}}_{\text{mask}}
-    \;\odot\;
-    \underbrace{\bm{C}\bm{B}^\top}_{\text{matmul \#1}}
-  \,\bigr)\,
-  \underbrace{\bm{V}}_{\text{matmul \#2 multiplies by this}} .
-\end{equation*}
-The mask $\bm{L}$ does \emph{not} add a matrix multiplication: it enters
-through the Hadamard (element-wise) product $\odot$, which multiplies
-the two $T\times T$ matrices $\bm{L}$ and $\bm{C}\bm{B}^\top$
-entry-by-entry. That touches only the $T^{2}$ entries already present
-and costs $O(T^{2})$ --- negligible beside the two matrix products. So
-the cost is fixed by \textbf{matmul \#1} ($\bm{C}\bm{B}^\top$) and
-\textbf{matmul \#2} (the result times $\bm{V}$).
-
-Both obey the \emph{same} rule of thumb: multiplying an $m\times k$
-matrix by a $k\times n$ matrix costs $m\,k\,n$ multiply-adds, because
-the result has $m\times n$ entries and each entry is a dot product of
-length $k$ ($k$ multiply-adds). Here $m,k,n$ are the generic
-placeholder dimensions of \S\ref{sec:sizes}; we now instantiate them
-for each of the two products.
-
-\medskip
-\noindent\emph{Step A --- form the scores $\bm{C}\bm{B}^\top$.}
-$\bm{C}$ is $T\times N$ and $\bm{B}^\top$ is $N\times T$, so
-$m=T$, $k=N$, $n=T$:
-\begin{equation*}
-  \underbrace{T}_{\text{one row per output token}}\!\times\!
-  \underbrace{N}_{\substack{\text{length of each}\\\text{dot product}}}\!\times\!
-  \underbrace{T}_{\text{one column per input token}}
-  \;=\; T^{2}N .
-\end{equation*}
-In words: the score matrix has one entry for every \emph{pair} of
-tokens, i.e.\ $T\times T = T^{2}$ entries, and computing one entry is a
-dot product between two length-$N$ state vectors $\bm{C}_i,\bm{B}_j$
-($N$ multiply-adds). Hence $T^{2}$ pairs $\times\,N$ each $= T^{2}N$.
-With $T=1296,\ N=64$: $1296^{2}\cdot 64 \approx 1.07\!\times\!10^{8}$
-multiply-adds per head. (The mask multiply $\bm{L}\odot(\cdot)$ only
-rescales the $T^{2}$ entries already computed, so it is a negligible
-$O(T^{2})$.)
-
-\medskip
-\noindent\emph{Step B --- mix the values,
-$(\bm{L}\odot\bm{C}\bm{B}^\top)\bm{V}$.}
-The masked $T\times T$ score matrix multiplies $\bm{V}$, which per head
-is $T\times d_{\text{head}}$, so $m=T$, $k=T$, $n=d_{\text{head}}$:
-\begin{equation*}
-  \underbrace{T}_{\text{output tokens}}\!\times\!
-  \underbrace{T}_{\substack{\text{tokens summed}\\\text{over}}}\!\times\!
-  \underbrace{d_{\text{head}}}_{\text{feature width}}
-  \;=\; T^{2}d_{\text{head}} .
-\end{equation*}
-In words: each of the $T$ output tokens is a weighted sum of all $T$
-value vectors, and each value vector carries $d_{\text{head}}$ numbers,
-giving $T\cdot T\cdot d_{\text{head}}$. Here $d_{\text{head}}=64$, so
-again $1296^{2}\cdot 64 \approx 1.07\!\times\!10^{8}$ per head.
-
-\emph{Why $d_{\text{head}}$ and not the full $D$?} Because attention is
-\textbf{multi-head}. The value matrix is $T\times D$ overall, but its $D=384$
-channels are split into $H=6$ heads of width $d_{\text{head}}=D/H=64$, and each
-head has its \emph{own} score matrix $\bm{L}\odot\bm{C}\bm{B}^\top$ that mixes
-only its own $T\times d_{\text{head}}$ slice of $\bm{V}$ --- hence
-$T^{2}d_{\text{head}}$ \emph{per head} (like Step~A's $T^{2}N$ per head). Summing
-over all $H$ heads restores the full width,
-\begin{equation*}
-  H\cdot T^{2}d_{\text{head}} \;=\; T^{2}\,(H\,d_{\text{head}}) \;=\; T^{2}D ,
-\end{equation*}
-so the per-head $T^{2}d_{\text{head}}$ and the whole-layer $T^{2}D$ are the same
-count, just organised head-by-head.
-
-\medskip
-Both steps scale as $T^{2}$, and since $T = HW/P^{2}$ is the number of
-patches, the cost grows with the \emph{square} of the image area --- the
-quadratic term this note is about. Concretely, the $T\times T$ score
-tensor is $1296^{2}\approx 1.68\!\times\!10^{6}$ scalars
-($\sim$\,6.7\,MiB at fp32 per head), the object whose size blows up with
-image side.
-
-\paragraph{Causality on a 2-D grid.}
-$\bm{L}_{ij}=0$ for $j>i$ in \eqref{eq:L2}/\eqref{eq:L3}: a patch in
-the top-right of the grid never reads from the bottom-left. To use
-this operator as a usable image self-attention, run it on the forward
-and reverse permutations and sum, as in
-\eqref{eq:bidi2}/\eqref{eq:bidi4}; that is what
-Section~\ref{sec:bidi} adds.
-
 %% ================================================================
-\section{Cross-Attention via Mamba-3}
+%% ================================================================
+%% ================================================================
+\section{Mamba-3 Cross-Attention}
 \label{sec:cross}
 %% ================================================================
 
@@ -1010,7 +815,688 @@ query $\bm{C}_i^q$ and $\bm{R}_{\le j}^{(kv)}$ to each key
 $\bm{B}_j^{kv}$ before the inner product. This injects relative
 positional information into cross-attention.
 
-\subsection{Worked example: cross-attention between two $504\!\times\!504$ images}
+%% ================================================================
+%% ================================================================
+%% ================================================================
+\section{Applying Mamba-3 to Images}
+\label{sec:images}
+%% ================================================================
+
+We now assemble the self- and cross-attention blocks into an image
+model.
+
+\subsection*{Patchification}
+
+Given an image $\bm{I}\in\mathbb{R}^{H\times W\times 3}$, choose a
+patch size $P$ and define $L = (H/P)(W/P)$ patches
+$\bm{p}_{r,c}\in\mathbb{R}^{3P^2}$ for
+$r\in\{1,\dots,H/P\},\,c\in\{1,\dots,W/P\}$. Project with a shared
+linear map:
+\begin{equation}\label{eq:patch-embed}
+  \bm{x}_{r,c} \;=\; \bm{W}_{\text{emb}}\,\bm{p}_{r,c} + \bm{b}_{\text{emb}},
+  \qquad \bm{W}_{\text{emb}}\in\mathbb{R}^{D\times 3P^2}.
+\end{equation}
+Flattening in row-major order gives a token sequence
+$\bm{x}_1,\dots,\bm{x}_L$. The same block works for $N_v$ views
+stacked as $N_v L$ tokens.
+\addcontentsline{toc}{subsection}{Patchification}
+
+\subsection*{Why a plain causal scan fails on images}
+
+Applying \eqref{eq:self-entry} directly to the flattened sequence
+gives
+\begin{equation}
+  \bm{y}_i^{\text{self}} = \sum_{j=1}^{i} L_{ij}\,(\bm{C}_i^\top\bm{B}_j)\,\bm{v}_j,
+\end{equation}
+i.e.\ each patch only sees patches \emph{earlier in raster order}.
+A patch at the top-right thus never reads from the bottom-left — half
+the image is missing. An image has no natural causal direction, so
+this asymmetry is harmful.
+\addcontentsline{toc}{subsection}{Why a plain causal scan fails on images}
+
+\subsection{Mamba-3's complex-SSM rotary: attention with learned RoPE}
+\label{sec:rope}
+
+Mamba-3 promotes $\bm{A}$ from a real scalar to a block-diagonal
+matrix of $2{\times}2$ rotations
+\begin{equation}\label{eq:Rdef}
+  \bm{R}_t = \mathrm{Block}\bigl(\{R(\Delta_t\,\theta_t[i])\}_{i=1}^{N/2}\bigr),
+  \qquad
+  R(\phi) = \begin{bmatrix}\cos\phi & -\sin\phi\\ \sin\phi & \cos\phi\end{bmatrix}.
+\end{equation}
+
+\paragraph{What $\Delta\theta$ is, and how $\theta$ is computed.}
+Notation first: the \textbf{bold} $\bm{\theta}_t\in\mathbb{R}^{N/2}$ is a
+\emph{vector} holding one \emph{angular frequency} per $2{\times}2$ rotation
+block; the \textbf{non-bold} $\theta_t[i]$ is its $i$-th \emph{scalar} entry
+($i=1,\dots,N/2$). The quantity fed to $R(\cdot)$ in \eqref{eq:Rdef} is the
+per-step angle
+\begin{equation}\label{eq:dtheta}
+  \boxed{\;\Delta\theta_t[i] \;:=\; \Delta_t\,\theta_t[i]\;}
+\end{equation}
+a product of the two \emph{scalars} $\Delta_t$ and $\theta_t[i]$ --- there is no
+inner product. For the whole vector, $\Delta_t$ just scales every entry,
+$\Delta\bm{\theta}_t=\Delta_t\,\bm{\theta}_t$, and $R(\Delta\theta_t[i])$ rotates
+the $i$-th coordinate pair of $\bm{B}_t,\bm{C}_t$ by that scalar angle. (The
+scaling by $\Delta_t$ mirrors the decay discretization $\alpha_t=e^{\Delta_t A_t}$
+of \eqref{eq:abc}: $\Delta_t$ turns a continuous-time rate into a per-step
+amount.)
+
+The one thing \eqref{eq:dtheta} does \emph{not} do is define $\theta$ itself.
+There are two ways to set $\theta$, and \textbf{the image encoder uses the second}:
+
+\smallskip
+\noindent\textbf{(a) General 1-D Mamba-3 --- content-based.} $\bm{\theta}_t$ is
+the imaginary part of the complex state matrix ($A_t+i\,\bm{\theta}_t$), a
+learned projection of the token, $\bm{\theta}_t=\bm{W}_\theta\,\bm{x}_t$
+(\cite{mamba3}, Prop.~2--3). A token's ``position angle'' is then the running sum
+$\Theta_{\le t}[i]=\sum_{s\le t}\Delta_s\,\theta_s[i]$, carried by
+$\bm{R}_{\le t}=\prod_{s\le t}\bm{R}_s^\top$. This is the data-dependent version
+of the Transformer's fixed frequencies $10000^{-2i/N}$.
+
+\smallskip
+\noindent\textbf{(b) Image encoder --- position-based (row and column).} For
+images we want a \emph{spatial} phase, so $\theta$ is built directly from the
+patch's grid position, step by step:
+\begin{enumerate}
+  \item Patchify into an $H_p\times W_p$ grid. The token at cell $(r,c)$ has
+        integer \emph{row} $r\in\{0,\dots,H_p{-}1\}$ and \emph{column}
+        $c\in\{0,\dots,W_p{-}1\}$.
+  \item Fix two frequency vectors
+        $\bm{\theta}^{\text{row}},\bm{\theta}^{\text{col}}\in\mathbb{R}^{N/2}$
+        (learned, or the fixed schedule $10000^{-2i/N}$), one scalar entry per
+        block $i$.
+  \item Form the block-$i$ angle from the row and column
+        (this is \eqref{eq:rope2d}):
+        \begin{equation*}
+          \theta_{r,c}[i]\;=\;\theta^{\text{row}}[i]\,r\;+\;\theta^{\text{col}}[i]\,c
+          \qquad(\text{a scalar, for each } i=1,\dots,N/2).
+        \end{equation*}
+  \item Use it as the \emph{total} angle (no $\Delta_t$ accumulation here): set
+        $\bm{R}_{r,c}=\mathrm{Block}(\{R(\theta_{r,c}[i])\}_i)$ and rotate that
+        patch's key/query, $\widetilde{\bm{B}}_{r,c}=\bm{R}_{r,c}\bm{B}_{r,c}$,
+        $\widetilde{\bm{C}}_{r,c}=\bm{R}_{r,c}\bm{C}_{r,c}$.
+  \item Result: the score between patches $(r,c)$ and $(r',c')$ uses
+        $\widetilde{\bm{C}}_{r,c}^{\top}\widetilde{\bm{B}}_{r',c'}$, whose block
+        $i$ carries $R\bigl(\theta_{r,c}[i]-\theta_{r',c'}[i]\bigr)$ --- so it
+        depends only on the \emph{2-D relative position} $(r{-}r',\,c{-}c')$,
+        which is the point of RoPE.
+\end{enumerate}
+So in the image model $\theta$ \emph{is} the row/column construction of step~3;
+case~(a) is the general mechanism it specialises, and \S\ref{sec:2drope} (next) recasts
+this 2-D RoPE as a standalone encoding applied outside the operator.
+
+Proposition~4 of \cite{mamba3} shows that this rotation view is equivalent
+to applying such data-dependent rotary embeddings to $\bm{B}$ and $\bm{C}$.
+Writing $\bm{R}_{\le t} := \prod_{i=0}^{t}\bm{R}_i^\top$, the complex
+recurrence is
+\begin{equation}\label{eq:complex-rec}
+  \bm{h}_t = \alpha_t\,\bm{h}_{t-1}
+            + \beta_t\,\bm{R}_{\le t-1}\,\bm{B}_{t-1}\,\bm{x}_{t-1}
+            + \gamma_t\,\bm{R}_{\le t}\,\bm{B}_{t}\,\bm{x}_{t},
+\qquad
+  \bm{y}_t = (\bm{R}_{\le t}\,\bm{C}_t)^\top\,\bm{h}_t.
+\end{equation}
+Following the same unrolling as in Section~\ref{sec:ssd}, the
+analogue of \eqref{eq:self-entry} becomes
+\begin{equation}\label{eq:self-rope}
+  \bm{y}_i^{\text{self}}
+     \;=\; \sum_{j=1}^{i} L_{ij}\,
+            \bigl(\widetilde{\bm{C}}_i^{\,\top}\widetilde{\bm{B}}_j\bigr)\,\bm{v}_j,
+  \qquad
+  \widetilde{\bm{C}}_i := \bm{R}_{\le i}\,\bm{C}_i,\quad
+  \widetilde{\bm{B}}_j := \bm{R}_{\le j}\,\bm{B}_j.
+\end{equation}
+That is, \textbf{Mamba-3 self-attention is linear attention with a
+structured mask $\bm{L}$ and a \emph{data-dependent} rotary embedding}
+applied to the $\bm{B}$ (key) and $\bm{C}$ (query) projections,
+exactly the Transformer's RoPE but with angles learned per token
+rather than fixed to $10000^{-2i/N}$.
+
+\subsection{2-D RoPE applied outside the operator}\label{sec:2drope}
+\label{sec:rope2d}
+
+To encode row and column positions, use the RoPE trick of
+\S\ref{sec:rope} with a \emph{factored} angle schedule. For the
+$n$-th channel of the state, split into independent row and column
+angles
+\begin{equation}\label{eq:rope2d}
+  \theta_{r,c}[n] = \theta^{\text{row}}[n]\cdot r + \theta^{\text{col}}[n]\cdot c,
+  \qquad n = 1,\dots,N/2,
+\end{equation}
+where $\theta^{\text{row}},\theta^{\text{col}}$ are learned or fixed
+frequency vectors. Replace $\bm{\theta}_t$ in \eqref{eq:Rdef} by
+$\theta_{r,c}$ for the patch at $(r,c)$. The resulting
+$\widetilde{\bm{C}}_i = \bm{R}_{\le i}\bm{C}_i$ and
+$\widetilde{\bm{B}}_j$ now carry a 2-D rotary position encoding
+inside the SSD inner product \eqref{eq:self-rope}.
+
+In the implementation this rotation is applied to $\bm{B}$ and $\bm{C}$
+\emph{before} they enter the SSD, which makes it uniform across every operator
+in this note: self-attention (\S\ref{sec:self}) rotates both projections by the
+token's own $(r,c)$; cross-attention (\S\ref{sec:cross}) rotates $\bm{C}^q$ by
+the query-side positions and $\bm{B}^{kv}$ by the key-side positions, so
+\eqref{eq:crossB-out} scores a query against a key by their \emph{relative}
+grid offset; NC-SSD (\S\ref{sec:ncssd}) rotates the same two projections even
+though its mask has collapsed. Applying it at the projections rather than inside
+the kernel is what keeps it operator-agnostic --- and it is why the fused kernel
+of \S\ref{sec:impl-kernel} is handed $\text{Angles}=\bm{0}$ to disable its own
+built-in 1-D rotary, which would otherwise rotate twice.
+
+The three operators do not depend on it equally. Bidirectional SSD encodes
+position twice over, once through RoPE and once through the mask's decay in
+$|i-j|$, so it degrades gracefully without RoPE. NC-SSD has no second channel:
+\S\ref{sec:ncssd-mamba3} shows its $T\times T$ mask collapses to a per-token
+scalar that cannot express any $|i-j|$ dependence, leaving RoPE as its
+\emph{only} source of relative position. Omitting RoPE therefore does not
+penalise the two operators equally, and a comparison run without it understates
+NC-SSD specifically (\S\ref{sec:ncssd-when}).
+
+\subsection{Bidirectional scan (forward \texorpdfstring{$+$}{+} reverse)}
+\label{sec:bidi}
+
+Fix a permutation $\pi$ of $\{1,\dots,L\}$. Let
+$\mathrm{SSD}_\pi(\bm{X})$ mean: permute rows by $\pi$, apply
+\eqref{eq:ssd-derived}, permute back. Because SSD's only source of
+order is the mask $\bm{L}$, every permutation gives a different,
+still-valid SSM scan.
+
+\paragraph{Two-direction (forward + reverse).} With the identity
+permutation $\pi_\to$ and its reverse $\pi_\leftarrow$,
+\begin{equation}\label{eq:bidi2}
+  \bm{Y}^{\text{bi}}
+   \;=\; \mathrm{SSD}_{\pi_\to}(\bm{X}) + \mathrm{SSD}_{\pi_\leftarrow}(\bm{X}).
+\end{equation}
+Unrolling: for any pair $(i,j)$, either $j\le i$ (covered by the
+forward pass) or $j>i$ (covered by the reverse pass), so every pair
+of tokens contributes exactly once, with a mask value depending on
+$|i-j|$ rather than on the sign of $i-j$. This turns causal SSD into
+bidirectional linear attention on the raster order, matching the
+bidirectional Mamba variants used in the literature.
+
+\paragraph{Equivalence to a symmetric mask.} Writing
+\eqref{eq:bidi2} entrywise,
+\begin{equation}\label{eq:bidi-sym}
+  \bm{y}_i^{\text{bi}} = \sum_{j=1}^{L} \widetilde{L}_{ij}\,
+       (\bm{C}_i^\top\bm{B}_j)\,\bm{v}_j,
+  \quad
+  \widetilde{L}_{ij} = L_{ij}^{\to} + L_{ij}^{\leftarrow},
+\end{equation}
+where $L^\to$ is \eqref{eq:L2} and $L^\leftarrow$ is the same matrix
+built on the reversed sequence. $\widetilde{L}$ is \emph{symmetric} in
+$i,j$: the forward pass covers $j\le i$, the reverse pass covers
+$j\ge i$, and with the diagonal counted twice the bidirectional
+self-attention has no preferred direction.
+
+\subsection{Four-directional scan (row-major \texorpdfstring{$+$}{+} column-major)}
+\label{sec:4dir}
+
+The permutation machinery of \S\ref{sec:bidi} is not limited to two orders.
+For 2-D structure, also scan along columns. Let $\pi^\downarrow$ scan
+column-by-column top-to-bottom and $\pi^\uparrow$ its reverse. Then
+\begin{equation}\label{eq:bidi4}
+  \bm{Y}^{\text{4-dir}}
+   = \mathrm{SSD}_{\pi_\to}(\bm{X}) + \mathrm{SSD}_{\pi_\leftarrow}(\bm{X})
+   + \mathrm{SSD}_{\pi^\downarrow}(\bm{X}) + \mathrm{SSD}_{\pi^\uparrow}(\bm{X}).
+\end{equation}
+Each summand uses the same learned weights; only the token order
+changes, so \eqref{eq:bidi4} adds no parameters. This mirrors the
+four scans of Vision-Mamba / V-Mamba realized under the Mamba-3 SSD
+kernel.
+
+%% ================================================================
+\subsection{Vision SSD: the non-causal collapse (NC-SSD / VSSD)}
+\label{sec:ncssd}
+%% ================================================================
+
+The bidirectional and multi-direction scans of \S\ref{sec:bidi}
+remove causality by \emph{repeating} the SSD kernel along several
+permutations of the token order. \cite{vssd} (VSSD, ICCV~2025)
+proposes an alternative that removes causality \emph{at the algebraic
+level}, so a single forward pass already yields a non-causal,
+position-independent operator. We derive their construction from the
+two-term recurrence \eqref{eq:rec2} using only the algebra of
+Section~\ref{sec:ssd}, then describe the resulting image block.
+
+\subsubsection{The reinterpretation of \texorpdfstring{$A_t$}{A-t}}
+
+Recall \eqref{eq:rec2}, $\bm{h}_t = \alpha_t\,\bm{h}_{t-1}
++ \gamma_t\,\bm{B}_t\bm{x}_t$ with $\alpha_t = e^{\Delta_t A_t}\in
+(0,1)$ controlling \emph{how much of the previous state is retained}.
+\cite{vssd} observe that in the SSD form, $A_t$ is a learned,
+data-dependent scalar with no a priori meaning: one is equally free to
+make it modulate the \emph{current} contribution instead. Concretely,
+fix the previous-state multiplier to $1$ and divide the input weight
+by $A_t$:
+\begin{equation}\label{eq:nc-rec}
+  \bm{h}_t \;=\; \bm{h}_{t-1} \;+\; \tfrac{1}{A_t}\,\bm{B}_t\bm{x}_t,
+  \qquad \bm{h}_0 = \bm{0},
+\end{equation}
+which is \cite{vssd}~eq.~(7). Unrolling \eqref{eq:nc-rec} with
+$\bm{h}_0=\bm{0}$,
+\begin{equation}\label{eq:nc-unroll}
+  \bm{h}_t \;=\; \sum_{i=1}^{t} \tfrac{1}{A_i}\,\bm{B}_i\bm{x}_i.
+\end{equation}
+Compared with \eqref{eq:un-claim}, the multiplicative decay
+$\prod_{k=j+1}^{t}\alpha_k$ has been replaced by a flat $1$: a token's
+contribution to the state no longer depends on \emph{when} it
+arrives, only on its own coefficient $1/A_i$. The mechanism is now
+\emph{self-referential}: each token decides its own weight.
+
+\subsubsection{Bidirectional NC-SSD collapses to a global hidden state}
+
+The recurrence \eqref{eq:nc-unroll} is still causal in the sense that
+$\bm{h}_t$ sums only over $i\le t$. Run it once forward and once
+backward and sum, exactly as in \eqref{eq:bidi2}, defining
+$\bm{Z}_j := \bm{B}_j\bm{x}_j^\top \in \mathbb{R}^{N\times D}$ (the
+outer product appearing in \eqref{eq:Hrec}):
+\begin{align}
+  \bm{H}_i^{\,\to}        &= \sum_{j=1}^{i}\tfrac{1}{A_j}\bm{Z}_j, \\
+  \bm{H}_i^{\,\leftarrow} &= \sum_{j=i}^{L}\tfrac{1}{A_j}\bm{Z}_j, \\
+  \bm{H}_i^{\,\text{bi}}  &= \bm{H}_i^{\,\to} + \bm{H}_i^{\,\leftarrow} - \tfrac{1}{A_i}\bm{Z}_i
+                          \;=\; \sum_{j=1}^{L}\tfrac{1}{A_j}\bm{Z}_j. \label{eq:nc-bi}
+\end{align}
+The $-\tfrac{1}{A_i}\bm{Z}_i$ correction removes the double counting
+of $j=i$. The last equality is the key observation of
+\cite{vssd}: the bidirectional NC-SSD hidden state is
+\emph{independent of $i$}. Writing
+\begin{equation}\label{eq:nc-H}
+  \bm{H} \;:=\; \sum_{j=1}^{L}\tfrac{1}{A_j}\bm{Z}_j
+       \;=\; \sum_{j=1}^{L}\tfrac{1}{A_j}\,\bm{B}_j\,\bm{x}_j^\top
+       \;\in\;\mathbb{R}^{N\times D},
+\end{equation}
+every output token reads from the \emph{same} compressed context
+$\bm{H}$. \cite{vssd}~eq.~(8) further notes that the self-term
+$\tfrac{1}{A_i}\bm{Z}_i$ is redundant with the block's skip
+connection, so in practice one keeps the simpler global form
+\eqref{eq:nc-H} and skips the correction.
+
+\subsubsection{Closed form: \texorpdfstring{$\bm{Y} = \bm{C}\bigl((\bm{B}\odot\bm{m})^\top\bm{X}\bigr)$}{Y = C ((B .* m)-transpose X)}}
+
+Let $\bm{m}\in\mathbb{R}^{L}$ with $m_j := 1/A_j$, and write $\bm{B}\odot\bm{m}$
+for the matrix whose $j$-th row is $m_j\,\bm{B}_j$ (i.e.\ $\bm{m}$
+broadcast along the $N$-axis). The output equation
+$\bm{y}_t = \bm{C}_t^\top\bm{H}$ stacks to
+\begin{equation}\label{eq:nc-Y}
+  \boxed{\;\bm{Y} \;=\; \bm{C}\,\bm{H} \;=\; \bm{C}\bigl((\bm{B}\odot\bm{m})^\top\bm{X}\bigr),\;}
+\end{equation}
+which is \cite{vssd}~eq.~(10). Shape check:
+$(\bm{B}\odot\bm{m})^\top\in\mathbb{R}^{N\times L}$, $\bm{X}\in
+\mathbb{R}^{L\times D}$, product is $\mathbb{R}^{N\times D}$, and
+$\bm{C}\in\mathbb{R}^{L\times N}$ times that is
+$\mathbb{R}^{L\times D}$, as required.
+
+Comparing \eqref{eq:nc-Y} with the SSD identity
+\eqref{eq:ssd-derived},
+\begin{equation}
+  \bm{Y}_{\text{SSD}} \;=\; \bigl(\bm{L}\odot\bm{C}\bm{B}^\top\bigr)\bm{X},
+  \qquad
+  \bm{Y}_{\text{NC-SSD}} \;=\; \bm{C}\bigl((\bm{B}\odot\bm{m})^\top\bm{X}\bigr),
+\end{equation}
+the $T\times T$ structured mask $\bm{L}$ has been replaced by a
+$T$-vector $\bm{m}$ that column-scales $\bm{B}$. The two operations
+are no longer of the same shape:
+\begin{itemize}
+  \item SSD pays $O(T^2 N)$ to form $\bm{L}\odot\bm{C}\bm{B}^\top$,
+        then $O(T^2 D)$ to multiply by $\bm{X}$, with state of size
+        $\bm{L}$ ($\Theta(T^2)$ if materialized).
+  \item NC-SSD pays $O(TND)$ to form $\bm{H}$, then $O(TND)$ for
+        $\bm{C}\bm{H}$, with state of size $\bm{H}\in\mathbb{R}^{N\times D}$
+        ($O(ND)$, \emph{independent of $T$}).
+\end{itemize}
+The price is uniformity: every query reads the same global summary
+$\bm{H}$, so the per-pair relative weight that $\bm{L}_{ij}$ encodes
+in SSD is gone. \cite{vssd} argues this is a correct trade for
+images, where no $1$-D distance is meaningful anyway.
+
+\paragraph{Practical note on parameterization.} \cite{vssd}~\S 3.2
+remarks that since $A_t$ and $1/A_t$ span the same range of values up
+to inversion, it is numerically simpler to learn $\bm{m}$ directly
+(equivalently, to learn $A$ via the existing projection
+\eqref{eq:projA} and then treat its output as $\bm{m}$). The two
+parameterizations differ only in the optimization geometry.
+
+\subsubsection{Relation to Mamba-3}\label{sec:ncssd-mamba3}
+
+VSSD is built on Mamba-2 (scalar $A$, two-term recurrence). The
+non-causality argument carries over to Mamba-3 unchanged: at the SSD
+level, both Mamba-2's \eqref{eq:L2} and Mamba-3's \eqref{eq:L3} have
+the same shape $\bm{Y} = (\bm{L}\odot\bm{C}\bm{B}^\top)\bm{X}$, and
+setting $\alpha_t \equiv 1$, $\gamma_t \mapsto 1/A_t$, $\beta_t \equiv 0$
+turns \eqref{eq:L3} into the rank-one mask $\bm{L}_{ij} = m_j$, which
+factors out of the Hadamard product:
+\begin{equation}
+  \bm{L}_{ij} = m_j
+  \;\Longrightarrow\;
+  \bm{L}\odot\bm{C}\bm{B}^\top
+     = \bm{C}\,(\bm{B}\odot\bm{m})^\top,
+\end{equation}
+recovering \eqref{eq:nc-Y}. The Mamba-3 extras compose cleanly on top
+of NC-SSD:
+\begin{itemize}
+  \item The RoPE trick of \S\ref{sec:rope} still applies: rotate
+        $\bm{B}_j, \bm{C}_i$ by $\bm{R}_{\le j}, \bm{R}_{\le i}$ before
+        \eqref{eq:nc-Y}, and the inner product
+        $\widetilde{\bm{C}}_i^\top \widetilde{\bm{B}}_j$ carries relative
+        positional information. With the 2-D factorization
+        \eqref{eq:rope2d}, this becomes the 2-D RoPE used by VSSD.
+  \item The MIMO extension of \S\ref{sec:mimo} carries over by
+        replicating \eqref{eq:nc-Y} per head: $\bm{Y}^{(i)} =
+        \bm{C}^{(i)}\bigl((\bm{B}^{(j)}\odot\bm{m})^\top\bm{X}^{(j)}\bigr)$,
+        summed over $j$.
+\end{itemize}
+The trapezoidal three-term form \eqref{eq:rec3} does \emph{not}
+survive the NC reduction: $\beta_t$ implements a two-band relative
+bias that fundamentally depends on $i,j$ separation, which the
+single-vector $\bm{m}$ cannot represent. VSSD-style NC-SSD is thus
+strictly a Mamba-2-style reduction of Mamba-3 — useful when the
+mask's expressivity is not needed (Section~\ref{sec:ncssd-when}).
+
+\subsubsection{Tensor-contraction algorithm}\label{sec:ncssd-tensor}
+
+\cite{vssd}~eq.~(9) writes \eqref{eq:nc-Y} as three einsum
+contractions, which matches the standard SSD kernel up to one
+collapsing step:
+\begin{align}
+  \bm{Z} &= \mathrm{contract}(LD, LN \to LND)(\bm{X}, \bm{B}), \label{eq:nc-Z}\\
+  \bm{H} &= \mathrm{contract}(L, LND \to ND)(\bm{m}, \bm{Z}), \label{eq:nc-H2}\\
+  \bm{Y} &= \mathrm{contract}(LN, ND \to LD)(\bm{C}, \bm{H}). \label{eq:nc-Y2}
+\end{align}
+Step~\eqref{eq:nc-Z} expands each token to its outer product
+$\bm{B}_j\bm{x}_j^\top$; step~\eqref{eq:nc-H2} reduces the $L$ axis
+into the single global state $\bm{H}$; step~\eqref{eq:nc-Y2} reads
+the state out per query. Compared with SSD's
+$\mathrm{contract}(LL, LDN \to ND)$ (\cite{vssd}~eq.~(9), top), the
+$LL$ mask has degenerated to an $L$-vector and the algorithm has no
+explicit $T\times T$ tensor at any point.
+
+\subsubsection{The VSSD image block}
+
+The NC-SSD operator \eqref{eq:nc-Y} replaces the SSD kernel inside an
+otherwise standard vision block. Following \cite{vssd}~\S 3.3:
+\begin{enumerate}
+  \item \textbf{Local Perception Unit (LPU)} \cite{vssd}: a depthwise
+        $3{\times}3$ convolution applied to the patch grid before the
+        NC-SSD and again before the FFN, injecting local 2-D
+        inductive bias on top of the global, position-independent
+        NC-SSD context.
+  \item \textbf{Depth-wise conv 1-D $\to$ 2-D.} The causal Conv1D
+        used inside Mamba-2 between the input and the SSD kernel is
+        replaced by a non-causal depth-wise Conv2D with kernel
+        size~$3$, consistent with the model being non-causal.
+  \item \textbf{2-D RoPE on $\bm{B},\bm{C}$.} The factored angle
+        \eqref{eq:rope2d} is applied to $\bm{C}_i$ and $\bm{B}_j$ before
+        the inner product in \eqref{eq:nc-Y}, restoring the spatial
+        relationship between patches that is otherwise lost in the
+        permutation-invariant global state $\bm{H}$. This is the
+        Mamba-3 RoPE trick of \S\ref{sec:rope} applied to the NC-SSD
+        kernel.
+  \item \textbf{FFN, residual, normalization.} A standard
+        Transformer-style FFN follows the NC-SSD; both the NC-SSD and
+        the FFN are wrapped in residual connections, matching the
+        ViT / Swin block layout rather than Mamba's pre-norm SwiGLU
+        layout.
+  \item \textbf{Hybrid with MSA in the last stage.} The four-stage
+        backbone uses NC-SSD blocks in stages~1--3 and standard
+        softmax MSA in the last stage. The rationale is that early
+        stages have many tokens, where the $O(T)$ scaling of NC-SSD
+        dominates; the last stage has few tokens but high-level
+        semantics, where the per-pair adaptivity of softmax MSA pays
+        off.
+  \item \textbf{Overlapped downsampling} between stages, in the
+        style of \cite{vssd}, replaces the non-overlapped patch
+        merging of VMamba.
+\end{enumerate}
+\paragraph{The vector $\bm{m}$ as a saliency map.} Because $\bm{m}\in
+\mathbb{R}^{L}$ acts as the only token-dependent weight in
+\eqref{eq:nc-Y}, it can be visualized as a 2-D heat map over the patch
+grid. Empirically \cite{vssd} report that $\bm{m}$ concentrates on
+the foreground object of the image — i.e.\ NC-SSD ends up learning a
+saliency-like weighting that the SSD mask $\bm{L}$ never makes
+explicit.
+
+\subsubsection{When to use NC-SSD versus bidirectional SSD}
+\label{sec:ncssd-when}
+
+\begin{center}
+\begin{tabular}{|l|l|l|}
+\hline
+ & \textbf{Bidirectional SSD} (\S\ref{sec:bidi}) & \textbf{NC-SSD} (this section)\\ \hline
+Mask state         & $O(T^2)$ (or banded fused kernel) & $O(ND)$ \\ \hline
+Compute per layer  & $O(T^2(N+D))\cdot k_{\text{scans}}$ & $O(TND)$ \\ \hline
+Per-pair adaptivity & $\bm{L}_{ij}$ and $\bm{C}_i^\top\bm{B}_j$ & $\bm{C}_i^\top\bm{B}_j$ only \\ \hline
+Position encoding   & decay in $|i-j|$ + RoPE   & RoPE only (decay collapses) \\ \hline
+Mamba-3 $\beta$-band & preserved (two-band mask) & does not survive (\S\ref{sec:ncssd-mamba3}) \\ \hline
+Typical regime      & moderate $T$, structure-rich tokens & long $T$, vision-style tokens \\ \hline
+\end{tabular}
+\end{center}
+The ``Position encoding'' row deserves emphasis, because it is the row most
+easily lost in an experiment. Bidirectional SSD gets relative position from two
+independent sources and NC-SSD from one, so the two operators are only compared
+fairly when RoPE (\S\ref{sec:rope2d}) is actually enabled. Disable it and
+bidirectional still has the decay band to fall back on while NC-SSD has nothing
+--- the resulting gap measures the missing positional encoding at least as much
+as it measures the operators. Any benchmark table comparing the two should
+therefore record whether RoPE was on.
+
+The two are not mutually exclusive: a hybrid stack can use NC-SSD in
+the early, high-resolution stages where $T$ dominates the cost, and
+bidirectional SSD (or softmax MSA, as in VSSD) in deeper stages where
+the mask's per-pair weighting matters. For our multi-view setting
+(\S\ref{sec:multiview}), NC-SSD also offers a free state-compressed
+cross-view block: each view's NC-SSD hidden state
+$\bm{H}^{(v)}\in\mathbb{R}^{N\times D}$ is already in the form that
+\eqref{eq:crossA-out} consumes, so cross-view attention reduces to
+$\bm{C}^{q\,\top}\sum_v \bm{H}^{(v)}$ with no additional kernel.
+
+\subsection{Dimension check}
+\label{sec:dimcheck}
+
+Every operator above is a chain of reshapes, einsums and one mask, and the fastest way
+to be sure a chain is right is to carry concrete shapes through it. The three
+walk-throughs below do that for the same $504\times504$ image at patch size $P=14$
+(so a $36\times36$ grid, $L=1296$ tokens) and feature width $D=384$ across $H=6$
+heads: once for self-attention, once for cross-attention between two such images, and
+once for the non-causal collapse, whose whole point is the shape that \emph{does not}
+appear ($T\times T$).
+
+\subsubsection{Self-attention on one \texorpdfstring{$504\!\times\!504$}{504x504} image}
+\label{sec:self-worked}
+
+To make the shapes concrete, apply \eqref{eq:self-out} to a single RGB
+image $\bm{I}\in\mathbb{R}^{504\times 504\times 3}$ with patch size
+$P=14$ and feature width $D=384$, split across $H=6$ heads
+($d_{\text{head}}=64$) with state dimension $N=64$. No special tokens,
+no multi-view assembly — just the operator on one image.
+
+\paragraph{From pixels to tokens.}
+The 504$\times$504 RGB image is sliced into non-overlapping
+$14\!\times\!14$ patches by a single strided convolution
+(\emph{patch embedding}), giving a $36\!\times\!36$ grid of
+patch-tokens. Each patch is then mapped to a $D$-dim feature vector
+by exactly the linear map of \eqref{eq:patch-embed}; we make every
+step concrete here.
+
+\medskip
+\noindent\emph{Step 1 — slice the image into patches.}
+Index the patch grid by $(r, c)$ with $r, c \in \{1, \dots, 36\}$.
+The $(r, c)$-th patch is the $14\!\times\!14\!\times\!3$ block
+\begin{equation}
+  \bm{P}_{r,c} \;\in\; \mathbb{R}^{14\times 14\times 3},
+  \qquad
+  \bm{P}_{r,c}[i, j, k] \;=\; \bm{I}\bigl[14(r{-}1){+}i,\; 14(c{-}1){+}j,\; k\bigr].
+\end{equation}
+Flatten its three colour planes into one vector (row-major over
+height, width, channel):
+\begin{equation}
+  \bm{p}_{r,c} \;:=\; \mathrm{vec}(\bm{P}_{r,c})
+   \;\in\; \mathbb{R}^{14 \cdot 14 \cdot 3} \;=\; \mathbb{R}^{588}.
+\end{equation}
+Each pixel of the patch contributes 3 scalars (one per RGB channel),
+so a patch is a $588$-dim vector of raw pixel intensities (typically
+each rescaled to $[0, 1]$ and then ImageNet-normalised).
+
+\medskip
+\noindent\emph{Step 2 — project each patch to a $D$-dim feature.}
+A single learned linear map (the patch-embedding weight) is shared
+across all $1296$ patches:
+\begin{equation}\label{eq:self-worked-embed}
+  \bm{x}_{r,c}
+   \;=\; \bm{W}_{\text{emb}}\,\bm{p}_{r,c} \;+\; \bm{b}_{\text{emb}}
+   \;\in\;\mathbb{R}^{D} = \mathbb{R}^{384},
+  \qquad
+  \bm{W}_{\text{emb}}\in\mathbb{R}^{384\times 588},
+  \quad
+  \bm{b}_{\text{emb}}\in\mathbb{R}^{384}.
+\end{equation}
+This is \eqref{eq:patch-embed} applied to our concrete numbers. Implemented as
+a $\mathrm{Conv2d}(3{\to}D, \text{kernel}{=}14, \text{stride}{=}14)$
+on the image, it does the slice and the linear map in one pass —
+mathematically identical to the per-patch formula above. The total
+parameter count of this layer is $D \cdot 14\!\cdot\!14\!\cdot\!3 + D
+= 384 \cdot 588 + 384 = 226\,176$ weights, shared across every patch
+position; learning adjusts $\bm{W}_{\text{emb}}$ so that the
+$D$-dim output discriminates whatever the downstream loss requires
+(class identity, depth, semantic mask, etc.).
+
+\medskip
+\noindent\emph{Step 3 — flatten the patch grid to a token sequence.}
+Read the $36\!\times\!36$ grid in row-major order to produce a length-$T$
+sequence:
+\begin{equation}
+  \bm{x}_t \;:=\; \bm{x}_{r,c},\quad t \;=\; 36(r{-}1) + c,\quad t = 1, \dots, T,
+  \qquad
+  T = 36 \cdot 36 = 1296.
+\end{equation}
+Stacking the $T$ rows gives the token matrix consumed by the
+attention layer:
+\begin{equation}
+  \bm{X}\;=\;(\bm{x}_1, \dots, \bm{x}_T)^\top
+   \;\in\; \mathbb{R}^{T \times D} \;=\; \mathbb{R}^{1296 \times 384}.
+\end{equation}
+The attention layer never sees pixels — it sees these $1296$ token
+vectors, each of dimension $D = 384$. Every subsequent
+operation in this worked example (projections to $\bm{B}, \bm{C},
+\bm{V}$, the masked inner product, etc.) treats $\bm{X}$ as its
+input matrix, with no further reference to the original
+\texorpdfstring{$504\!\times\!504$}{504x504} pixel grid.
+
+\paragraph{What the layer computes.}
+The per-token projections \eqref{eq:projB}, \eqref{eq:projC},
+\eqref{eq:projV}, \eqref{eq:projA} produce
+\begin{equation}
+  \bm{B},\bm{C}\in\mathbb{R}^{T\times N}=\mathbb{R}^{1296\times 64},
+  \quad
+  \bm{V}\in\mathbb{R}^{T\times D}=\mathbb{R}^{1296\times 384},
+  \quad
+  \bm{L}\in\mathbb{R}^{T\times T}=\mathbb{R}^{1296\times 1296},
+\end{equation}
+where $\bm{V} = (\bm{v}_1,\dots,\bm{v}_T)^\top$ collects the
+value-projected rows $\bm{v}_t = \mathrm{SiLU}(\bm{W}_V\bm{x}_t)$.
+The output is
+\begin{equation}
+  \bm{Y}_{\text{self}}
+   \;=\; \bigl(\bm{L}\odot\bm{C}\bm{B}^\top\bigr)\bm{V}
+   \;\in\;\mathbb{R}^{T\times D}=\mathbb{R}^{1296\times 384}.
+\end{equation}
+\emph{Output shape equals input shape}: every patch still has a single
+$D$-dimensional feature; only its content has been re-mixed across the
+1296 tokens, weighted by the structured mask $\bm{L}$.
+
+\paragraph{Cost in this configuration.}
+The output \eqref{eq:self-out} involves \emph{four} matrices ---
+$\bm{C}$, $\bm{B}$, $\bm{L}$, and $\bm{V}$ --- combined by three
+operations, but only \emph{two} of them are matrix multiplications:
+\begin{equation*}
+  \bm{Y}_{\text{self}}
+  \;=\;
+  \bigl(\,
+    \underbrace{\bm{L}}_{\text{mask}}
+    \;\odot\;
+    \underbrace{\bm{C}\bm{B}^\top}_{\text{matmul \#1}}
+  \,\bigr)\,
+  \underbrace{\bm{V}}_{\text{matmul \#2 multiplies by this}} .
+\end{equation*}
+The mask $\bm{L}$ does \emph{not} add a matrix multiplication: it enters
+through the Hadamard (element-wise) product $\odot$, which multiplies
+the two $T\times T$ matrices $\bm{L}$ and $\bm{C}\bm{B}^\top$
+entry-by-entry. That touches only the $T^{2}$ entries already present
+and costs $O(T^{2})$ --- negligible beside the two matrix products. So
+the cost is fixed by \textbf{matmul \#1} ($\bm{C}\bm{B}^\top$) and
+\textbf{matmul \#2} (the result times $\bm{V}$).
+
+Both obey the \emph{same} rule of thumb: multiplying an $m\times k$
+matrix by a $k\times n$ matrix costs $m\,k\,n$ multiply-adds, because
+the result has $m\times n$ entries and each entry is a dot product of
+length $k$ ($k$ multiply-adds). Here $m,k,n$ are the generic
+placeholder dimensions of \S\ref{sec:sizes}; we now instantiate them
+for each of the two products.
+
+\medskip
+\noindent\emph{Step A --- form the scores $\bm{C}\bm{B}^\top$.}
+$\bm{C}$ is $T\times N$ and $\bm{B}^\top$ is $N\times T$, so
+$m=T$, $k=N$, $n=T$:
+\begin{equation*}
+  \underbrace{T}_{\text{one row per output token}}\!\times\!
+  \underbrace{N}_{\substack{\text{length of each}\\\text{dot product}}}\!\times\!
+  \underbrace{T}_{\text{one column per input token}}
+  \;=\; T^{2}N .
+\end{equation*}
+In words: the score matrix has one entry for every \emph{pair} of
+tokens, i.e.\ $T\times T = T^{2}$ entries, and computing one entry is a
+dot product between two length-$N$ state vectors $\bm{C}_i,\bm{B}_j$
+($N$ multiply-adds). Hence $T^{2}$ pairs $\times\,N$ each $= T^{2}N$.
+With $T=1296,\ N=64$: $1296^{2}\cdot 64 \approx 1.07\!\times\!10^{8}$
+multiply-adds per head. (The mask multiply $\bm{L}\odot(\cdot)$ only
+rescales the $T^{2}$ entries already computed, so it is a negligible
+$O(T^{2})$.)
+
+\medskip
+\noindent\emph{Step B --- mix the values,
+$(\bm{L}\odot\bm{C}\bm{B}^\top)\bm{V}$.}
+The masked $T\times T$ score matrix multiplies $\bm{V}$, which per head
+is $T\times d_{\text{head}}$, so $m=T$, $k=T$, $n=d_{\text{head}}$:
+\begin{equation*}
+  \underbrace{T}_{\text{output tokens}}\!\times\!
+  \underbrace{T}_{\substack{\text{tokens summed}\\\text{over}}}\!\times\!
+  \underbrace{d_{\text{head}}}_{\text{feature width}}
+  \;=\; T^{2}d_{\text{head}} .
+\end{equation*}
+In words: each of the $T$ output tokens is a weighted sum of all $T$
+value vectors, and each value vector carries $d_{\text{head}}$ numbers,
+giving $T\cdot T\cdot d_{\text{head}}$. Here $d_{\text{head}}=64$, so
+again $1296^{2}\cdot 64 \approx 1.07\!\times\!10^{8}$ per head.
+
+\emph{Why $d_{\text{head}}$ and not the full $D$?} Because attention is
+\textbf{multi-head}. The value matrix is $T\times D$ overall, but its $D=384$
+channels are split into $H=6$ heads of width $d_{\text{head}}=D/H=64$, and each
+head has its \emph{own} score matrix $\bm{L}\odot\bm{C}\bm{B}^\top$ that mixes
+only its own $T\times d_{\text{head}}$ slice of $\bm{V}$ --- hence
+$T^{2}d_{\text{head}}$ \emph{per head} (like Step~A's $T^{2}N$ per head). Summing
+over all $H$ heads restores the full width,
+\begin{equation*}
+  H\cdot T^{2}d_{\text{head}} \;=\; T^{2}\,(H\,d_{\text{head}}) \;=\; T^{2}D ,
+\end{equation*}
+so the per-head $T^{2}d_{\text{head}}$ and the whole-layer $T^{2}D$ are the same
+count, just organised head-by-head.
+
+\medskip
+Both steps scale as $T^{2}$, and since $T = HW/P^{2}$ is the number of
+patches, the cost grows with the \emph{square} of the image area --- the
+quadratic term this note is about. Concretely, the $T\times T$ score
+tensor is $1296^{2}\approx 1.68\!\times\!10^{6}$ scalars
+($\sim$\,6.7\,MiB at fp32 per head), the object whose size blows up with
+image side.
+
+\paragraph{Causality on a 2-D grid.}
+$\bm{L}_{ij}=0$ for $j>i$ in \eqref{eq:L2}/\eqref{eq:L3}: a patch in
+the top-right of the grid never reads from the bottom-left. To use
+this operator as a usable image self-attention, run it on the forward
+and reverse permutations and sum, as in
+\eqref{eq:bidi2}/\eqref{eq:bidi4}; that is what
+Section~\ref{sec:bidi} adds.
+
+\subsubsection{Cross-attention between two \texorpdfstring{$504\!\times\!504$}{504x504} images}
 \label{sec:cross-worked}
 
 Two RGB images $\bm{I}^q,\bm{I}^{kv}\in\mathbb{R}^{504\times 504\times 3}$
@@ -1069,128 +1555,204 @@ Image~2's grid never appears in $\bm{Y}^q$; if you also want
 image~2 informed by image~1, run the operator a second time with the
 roles of $(q, kv)$ swapped.
 
-%% ================================================================
-\section{Applying Mamba-3 to Images}
-\label{sec:images}
-%% ================================================================
+\subsubsection{VSSD on one \texorpdfstring{$504\!\times\!504$}{504x504} image}
+\label{sec:vssd-worked}
 
-We now assemble the self- and cross-attention blocks into an image
-model.
+Apply \eqref{eq:nc-Y} to the same single image
+$\bm{I}\in\mathbb{R}^{504\times 504\times 3}$, patch $P=14$, $D=384$,
+$H=6$ heads ($d_{\text{head}}=64$), state $N=64$, so that the input to
+the attention layer is the patch-token matrix
+$\bm{X}\in\mathbb{R}^{T\times D}=\mathbb{R}^{1296\times 384}$.
 
-\subsection{Patchification}
-
-Given an image $\bm{I}\in\mathbb{R}^{H\times W\times 3}$, choose a
-patch size $P$ and define $L = (H/P)(W/P)$ patches
-$\bm{p}_{r,c}\in\mathbb{R}^{3P^2}$ for
-$r\in\{1,\dots,H/P\},\,c\in\{1,\dots,W/P\}$. Project with a shared
-linear map:
-\begin{equation}\label{eq:patch-embed}
-  \bm{x}_{r,c} \;=\; \bm{W}_{\text{emb}}\,\bm{p}_{r,c} + \bm{b}_{\text{emb}},
-  \qquad \bm{W}_{\text{emb}}\in\mathbb{R}^{D\times 3P^2}.
-\end{equation}
-Flattening in row-major order gives a token sequence
-$\bm{x}_1,\dots,\bm{x}_L$. The same block works for $N_v$ views
-stacked as $N_v L$ tokens.
-
-\subsection{Why a plain causal scan fails on images}
-
-Applying \eqref{eq:self-entry} directly to the flattened sequence
-gives
+\paragraph{Per-token quantities.}
+The projections produce
 \begin{equation}
-  \bm{y}_i^{\text{self}} = \sum_{j=1}^{i} L_{ij}\,(\bm{C}_i^\top\bm{B}_j)\,\bm{v}_j,
-\end{equation}
-i.e.\ each patch only sees patches \emph{earlier in raster order}.
-A patch at the top-right thus never reads from the bottom-left — half
-the image is missing. An image has no natural causal direction, so
-this asymmetry is harmful.
-
-\subsection{Bidirectional and multi-direction scans}
-\label{sec:bidi}
-
-Fix a permutation $\pi$ of $\{1,\dots,L\}$. Let
-$\mathrm{SSD}_\pi(\bm{X})$ mean: permute rows by $\pi$, apply
-\eqref{eq:ssd-derived}, permute back. Because SSD's only source of
-order is the mask $\bm{L}$, every permutation gives a different,
-still-valid SSM scan.
-
-\paragraph{Two-direction (forward + reverse).} With the identity
-permutation $\pi_\to$ and its reverse $\pi_\leftarrow$,
-\begin{equation}\label{eq:bidi2}
-  \bm{Y}^{\text{bi}}
-   \;=\; \mathrm{SSD}_{\pi_\to}(\bm{X}) + \mathrm{SSD}_{\pi_\leftarrow}(\bm{X}).
-\end{equation}
-Unrolling: for any pair $(i,j)$, either $j\le i$ (covered by the
-forward pass) or $j>i$ (covered by the reverse pass), so every pair
-of tokens contributes exactly once, with a mask value depending on
-$|i-j|$ rather than on the sign of $i-j$. This turns causal SSD into
-bidirectional linear attention on the raster order, matching the
-bidirectional Mamba variants used in the literature.
-
-\paragraph{Four-direction (raster + reverse + column-major + reverse).}
-For 2-D structure, also scan along columns. Let $\pi^\downarrow$ scan
-column-by-column top-to-bottom and $\pi^\uparrow$ its reverse. Then
-\begin{equation}\label{eq:bidi4}
-  \bm{Y}^{\text{4-dir}}
-   = \mathrm{SSD}_{\pi_\to}(\bm{X}) + \mathrm{SSD}_{\pi_\leftarrow}(\bm{X})
-   + \mathrm{SSD}_{\pi^\downarrow}(\bm{X}) + \mathrm{SSD}_{\pi^\uparrow}(\bm{X}).
-\end{equation}
-Each summand uses the same learned weights; only the token order
-changes, so \eqref{eq:bidi4} adds no parameters. This mirrors the
-four scans of Vision-Mamba / V-Mamba realized under the Mamba-3 SSD
-kernel.
-
-\paragraph{Equivalence to a symmetric mask.} Writing
-\eqref{eq:bidi2} entrywise,
-\begin{equation}\label{eq:bidi-sym}
-  \bm{y}_i^{\text{bi}} = \sum_{j=1}^{L} \widetilde{L}_{ij}\,
-       (\bm{C}_i^\top\bm{B}_j)\,\bm{v}_j,
+  \bm{B},\bm{C}\in\mathbb{R}^{T\times N}=\mathbb{R}^{1296\times 64},
   \quad
-  \widetilde{L}_{ij} = L_{ij}^{\to} + L_{ij}^{\leftarrow},
+  \bm{V}\in\mathbb{R}^{T\times D}=\mathbb{R}^{1296\times 384},
+  \quad
+  \bm{m} = \mathrm{softplus}(A_{\log})\in\mathbb{R}_{>0}^{T}=\mathbb{R}_{>0}^{1296}.
 \end{equation}
-where $L^\to$ is \eqref{eq:L2} and $L^\leftarrow$ is the same matrix
-built on the reversed sequence. $\widetilde{L}$ is \emph{symmetric} in
-$i,j$: the forward pass covers $j\le i$, the reverse pass covers
-$j\ge i$, and with the diagonal counted twice the bidirectional
-self-attention has no preferred direction.
+$\bm{V}$ stacks the value-projected rows $\bm{v}_t =
+\mathrm{SiLU}(\bm{W}_V\bm{x}_t)$ — the matrix that enters the NC-SSD
+identity \eqref{eq:nc-Y} (filling its placeholder $\bm{X}$, in the
+sense of the bridge of \S\ref{sec:self}).
+The crucial step is that $\bm{m}$ is a \emph{single positive scalar
+per patch} — independent of the query position. This is the
+degeneration of the $T\!\times\!T$ mask $\bm{L}$ into a single
+$T$-vector that \cite{vssd} exploits.
 
-\subsection{2-D positional encoding via the complex SSM}\label{sec:2drope}
-\label{sec:rope2d}
-
-To encode row and column positions, use the RoPE trick of
-\S\ref{sec:rope} with a \emph{factored} angle schedule. For the
-$n$-th channel of the state, split into independent row and column
-angles
-\begin{equation}\label{eq:rope2d}
-  \theta_{r,c}[n] = \theta^{\text{row}}[n]\cdot r + \theta^{\text{col}}[n]\cdot c,
-  \qquad n = 1,\dots,N/2,
+\paragraph{Hidden state — a global summary of the image.}
+The contracted form \eqref{eq:nc-H2} sums all 1296 patches into one
+small object:
+\begin{equation}\label{eq:vssd-worked-H}
+  \bm{H}
+   \;=\; \sum_{t'=1}^{T} (\bm{B}_{t'}\,m_{t'})\,\bm{v}_{t'}^\top
+   \;\in\;\mathbb{R}^{N\times D} = \mathbb{R}^{64\times 384}.
 \end{equation}
-where $\theta^{\text{row}},\theta^{\text{col}}$ are learned or fixed
-frequency vectors. Replace $\bm{\theta}_t$ in \eqref{eq:Rdef} by
-$\theta_{r,c}$ for the patch at $(r,c)$. The resulting
-$\widetilde{\bm{C}}_i = \bm{R}_{\le i}\bm{C}_i$ and
-$\widetilde{\bm{B}}_j$ now carry a 2-D rotary position encoding
-inside the SSD inner product \eqref{eq:self-rope}.
+Total size: $N\!\cdot\!D = 24\,576$ scalars regardless of $T$ — the
+same 24\,576 numbers whether the image is $224^{2}$ ($T\!=\!256$),
+$504^{2}$ ($T\!=\!1296$), or $1008^{2}$ ($T\!=\!5184$). $\bm{H}$ is a
+rank-$N$ compressed picture of the image, weighted by the saliency
+$\bm{m}$.
 
-In the implementation this rotation is applied to $\bm{B}$ and $\bm{C}$
-\emph{before} they enter the SSD, which makes it uniform across every operator
-in this note: self-attention (\S\ref{sec:self}) rotates both projections by the
-token's own $(r,c)$; cross-attention (\S\ref{sec:cross}) rotates $\bm{C}^q$ by
-the query-side positions and $\bm{B}^{kv}$ by the key-side positions, so
-\eqref{eq:crossB-out} scores a query against a key by their \emph{relative}
-grid offset; NC-SSD (\S\ref{sec:ncssd}) rotates the same two projections even
-though its mask has collapsed. Applying it at the projections rather than inside
-the kernel is what keeps it operator-agnostic --- and it is why the fused kernel
-of \S\ref{sec:impl-kernel} is handed $\text{Angles}=\bm{0}$ to disable its own
-built-in 1-D rotary, which would otherwise rotate twice.
+\paragraph{Per-patch readout.}
+Each output patch then reads from the global summary:
+\begin{equation}\label{eq:vssd-worked-Y}
+  \bm{Y}_t \;=\; \bm{C}_t\,\bm{H}
+  \;\in\;\mathbb{R}^{D},
+  \qquad
+  \bm{Y}\in\mathbb{R}^{T\times D} = \mathbb{R}^{1296\times 384}.
+\end{equation}
+\emph{Output shape equals input shape}: every patch still has one
+$D$-dim feature. The only patch-specific computation at read-out is
+the small product $\bm{C}_t\bm{H}$ ($N\!\cdot\!D$ multiply-adds per
+token). The expensive part — building $\bm{H}$ — was paid once.
 
-The three operators do not depend on it equally. Bidirectional SSD encodes
-position twice over, once through RoPE and once through the mask's decay in
-$|i-j|$, so it degrades gracefully without RoPE. NC-SSD has no second channel:
-\S\ref{sec:ncssd-mamba3} shows its $T\times T$ mask collapses to a per-token
-scalar that cannot express any $|i-j|$ dependence, leaving RoPE as its
-\emph{only} source of relative position. Omitting RoPE therefore does not
-penalise the two operators equally, and a comparison run without it understates
-NC-SSD specifically (\S\ref{sec:ncssd-when}).
+\paragraph{Comparing the three operators on this image.}
+On the same $T\!=\!1296$ tokens and same $N, D$:
+\begin{center}
+\begin{tabular}{|l|l|l|l|}
+\hline
+ & \textbf{SSD (Mamba-3)} & \textbf{Softmax MSA} & \textbf{NC-SSD (VSSD)} \\ \hline
+Per-pair coupling      & $\bm{L}_{ij}\!\cdot\!\bm{C}_i^\top\bm{B}_j$ & $\mathrm{softmax}(\bm{Q}_i^\top\bm{K}_j)$ & $m_j$ \emph{only} \\ \hline
+State size             & $\Theta(T^2)$ if $\bm{L}$ materialized & $\Theta(T^2)$ & $\Theta(ND) = 24\,576$ \\ \hline
+Cost (this image)      & $O(T^2 N) \approx 1.07\!\times\!10^{8}$ & $O(T^2 D) \approx 6.4\!\times\!10^{8}$ & $O(TND) \approx 3.2\!\times\!10^{7}$ \\ \hline
+Scaling with image side & quadratic in $T$ & quadratic in $T$ & linear in $T$ \\ \hline
+\end{tabular}
+\end{center}
+The NC-SSD column is roughly $20\times$ cheaper than softmax MSA on
+this image and stays linear when the image grows; the cost paid is
+that every output position reads from the \emph{same} summary
+$\bm{H}$, with the only token-dependent weight being the scalar
+$m_{t'}$ in \eqref{eq:vssd-worked-H}.
+
+%% ================================================================
+\subsection{Implementation notes}
+\label{sec:impl}
+%% ================================================================
+
+The derivations above fix the mathematics; three implementation choices decide
+whether a run actually measures it. All three have gone wrong here in ways that
+raised no error: a stale dependency silently swapped which operator was running,
+a precision ``fix'' silently did nothing, and a constructor default silently
+makes two code paths compute different things. They are recorded here rather
+than left implicit in the code.
+
+\subsubsection{Numerical precision: bf16 everywhere, fp32 inside the kernel}
+\label{sec:impl-precision}
+
+Every operator runs under \textbf{bf16} autocast, uniformly --- the same dtype
+for softmax attention, bidirectional SSD and NC-SSD, so an accuracy comparison
+between them is not partly a precision comparison. bf16 rather than fp16 is
+deliberate: the decay factors of \S\ref{sec:decay} enter the mask as a
+\emph{cumulative product} $\prod_{k=j+1}^{i}\alpha_k$ along the sequence, which
+for long $T$ ranges over many orders of magnitude. fp16's 5-bit exponent
+underflows there; bf16 keeps fp32's 8-bit exponent and spends its precision
+instead, which is the right trade for this operator.
+
+The fused kernel (\S\ref{sec:impl-kernel}) internally upcasts $\bm{Q},\bm{K},
+\bm{V}$ to fp32 because its accumulators are fp32, and downcasts on the way out.
+That is an internal detail of the same operator, not a departure from the
+uniform bf16 policy.
+
+Two traps are worth stating explicitly.
+\begin{itemize}
+  \item \emph{Casting under autocast does nothing.} Writing \verb|x.float()|
+        inside an autocast region does not give an fp32 matmul: autocast
+        re-downcasts the inputs of every matmul and einsum it governs. Forcing
+        fp32 requires opting the region out with
+        \verb|torch.autocast(..., enabled=False)|. A precision ``fix'' that
+        omits this changes nothing and returns bit-identical numbers --- which
+        is easy to misread as evidence that precision was not the problem.
+  \item \emph{The reference path and the kernel are not automatically the same
+        operator.} The PyTorch fallback honours the \verb|row_renorm| flag while
+        the fused kernel silently ignores it. With the constructor default
+        \verb|row_renorm=True| the two paths therefore compute different things.
+        Pass \verb|row_renorm=False| whenever the two are meant to be compared.
+\end{itemize}
+
+\subsubsection{Fused Triton kernel}
+\label{sec:impl-kernel}
+
+Bidirectional SSD runs on the upstream Mamba-3 SISO Triton kernel by default: it
+is both faster than the PyTorch reference path and the path any published
+number should be quoted from. The reference path remains for CPU runs and for
+kernel debugging. NC-SSD never uses it --- \eqref{eq:nc-Y} is two einsums, with
+no mask to fuse.
+
+Reaching the kernel needs one piece of plumbing. Upstream's \verb|mamba_ssm|
+package eagerly imports its high-level models from \verb|__init__.py|, and those
+pull in the cute and tilelang backends (\verb|tilelang|, \verb|cutlass|,
+\verb|quack|). Since Python executes a package's \verb|__init__| before any
+submodule, importing the Triton kernel alone would drag in three unrelated
+backends. We instead register \verb|mamba_ssm| as a bare namespace package over
+the upstream directory: every \verb|__init__| between it and
+\verb|ops.triton.mamba3| is empty, so the kernels import while the heavy
+top-level never runs, and those three packages are not dependencies at all.
+
+Note also that the kernel has a built-in 1-D rotary, which we disable by passing
+$\text{Angles}=\bm{0}$; positions are already encoded by the 2-D RoPE applied to
+$\bm{B}$ and $\bm{C}$ upstream of the kernel (\S\ref{sec:rope2d}).
+
+\subsubsection{Pinning the upstream dependency}
+\label{sec:impl-pin}
+\label{sec:impl-pinning}
+
+\verb|third_party/mamba-ssm| is a \textbf{git submodule} on official upstream,
+pinned to a specific commit, and it must stay one. We call upstream's kernels
+directly, so its version is part of our numerical definition: two checkouts of
+this repository that disagree on that commit can disagree on results.
+
+This is not hypothetical. The directory was previously a symlink to a shared
+local clone, which drifted onto a branch well behind upstream. On that revision
+the kernel's backward pass raised a dtype error, so \verb|Mamba3SelfAttention|
+fell back to the reference path --- slower, and by \S\ref{sec:impl-precision}
+not even the same operator under the default flags. A previously published
+accuracy number stopped reproducing, and because a symlink records no version,
+nothing in the repository said which upstream revision had produced it. Pointing
+at official upstream's latest \verb|main| fixed the kernel outright.
+
+Practical consequences: bump the pin deliberately and commit it; re-run any
+benchmark whose numbers are still quoted after a bump; and when a measurement
+stops reproducing, check the dependency's log against the date of the
+measurement before suspecting the measurement.
+
+%% ================================================================
+\subsubsection{Provenance of the VSSD implementation}
+%% ================================================================
+
+The repo already had a Mamba-3 SSD attention module
+(\texttt{src/mamba3\_attn/mamba3/self\_attention.py}) and a DA-3
+adapter (\texttt{da3\_adapter.py}) that swaps it into any block with a
+standard \texttt{(B, T, D)} interface. We added the VSSD operator with
+the same interface so the dispatch site picks between them via a flag.
+
+\paragraph{New code (added in this work).}
+\begin{itemize}
+  \item \texttt{src/mamba3\_attn/mamba3/vssd\_attention.py} -- the
+        NC-SSD operator. Two einsums (no $T\times T$ mask, no
+        Triton kernel), 135 lines, CPU-compatible.
+  \item \texttt{src/mamba3\_attn/da3\_adapter.py} -- new
+        \texttt{Mamba3VSSDAdapter} wrapper with the same kwargs as
+        the existing \texttt{Mamba3Attention} so the DA-3 swap can
+        choose between them.
+  \item \texttt{src/mamba3\_attn/patch.py} -- one new
+        \texttt{variant="mamba3" \textbar{} "vssd"} kwarg on
+        \texttt{install\_mamba3(...)}; SSD-only flags
+        (\texttt{bidirectional, three\_term, chunk\_size, ...}) are
+        silently ignored when the VSSD variant is selected.
+  \item \texttt{scripts/cifar10\_compare.py} +
+        \texttt{scripts/plot\_cifar10\_compare.py} -- new
+        \texttt{vit\_mamba3\_vssd} variant + matching plot registry.
+  \item \texttt{src/mamba3\_attn/train/train\_super.py} +
+        \texttt{scripts/multi\_scene\_distill.py} --
+        \texttt{--variant} CLI threaded through to the DA-3
+        training/eval pipeline.
+  \item \texttt{tests/unit/test\_vssd\_attention.py} -- 7 new unit
+        tests (shape, closed-form match, non-causality, 2-D RoPE,
+        attn-mask, CPU path). All 60 tests in the suite pass.
+\end{itemize}
 
 \subsection{Image self-attention layer}
 
@@ -1266,324 +1828,10 @@ much larger than the query view, or is reused across many queries
 encoding).
 
 %% ================================================================
-\section{Non-Causal SSD and the VSSD Image Model}
-\label{sec:ncssd}
 %% ================================================================
-
-The bidirectional and multi-direction scans of \S\ref{sec:bidi}
-remove causality by \emph{repeating} the SSD kernel along several
-permutations of the token order. \cite{vssd} (VSSD, ICCV~2025)
-proposes an alternative that removes causality \emph{at the algebraic
-level}, so a single forward pass already yields a non-causal,
-position-independent operator. We derive their construction from the
-two-term recurrence \eqref{eq:rec2} using only the algebra of
-Section~\ref{sec:ssd}, then describe the resulting image block.
-
-\subsection{The reinterpretation of $A_t$}
-
-Recall \eqref{eq:rec2}, $\bm{h}_t = \alpha_t\,\bm{h}_{t-1}
-+ \gamma_t\,\bm{B}_t\bm{x}_t$ with $\alpha_t = e^{\Delta_t A_t}\in
-(0,1)$ controlling \emph{how much of the previous state is retained}.
-\cite{vssd} observe that in the SSD form, $A_t$ is a learned,
-data-dependent scalar with no a priori meaning: one is equally free to
-make it modulate the \emph{current} contribution instead. Concretely,
-fix the previous-state multiplier to $1$ and divide the input weight
-by $A_t$:
-\begin{equation}\label{eq:nc-rec}
-  \bm{h}_t \;=\; \bm{h}_{t-1} \;+\; \tfrac{1}{A_t}\,\bm{B}_t\bm{x}_t,
-  \qquad \bm{h}_0 = \bm{0},
-\end{equation}
-which is \cite{vssd}~eq.~(7). Unrolling \eqref{eq:nc-rec} with
-$\bm{h}_0=\bm{0}$,
-\begin{equation}\label{eq:nc-unroll}
-  \bm{h}_t \;=\; \sum_{i=1}^{t} \tfrac{1}{A_i}\,\bm{B}_i\bm{x}_i.
-\end{equation}
-Compared with \eqref{eq:un-claim}, the multiplicative decay
-$\prod_{k=j+1}^{t}\alpha_k$ has been replaced by a flat $1$: a token's
-contribution to the state no longer depends on \emph{when} it
-arrives, only on its own coefficient $1/A_i$. The mechanism is now
-\emph{self-referential}: each token decides its own weight.
-
-\subsection{Bidirectional NC-SSD collapses to a global hidden state}
-
-The recurrence \eqref{eq:nc-unroll} is still causal in the sense that
-$\bm{h}_t$ sums only over $i\le t$. Run it once forward and once
-backward and sum, exactly as in \eqref{eq:bidi2}, defining
-$\bm{Z}_j := \bm{B}_j\bm{x}_j^\top \in \mathbb{R}^{N\times D}$ (the
-outer product appearing in \eqref{eq:Hrec}):
-\begin{align}
-  \bm{H}_i^{\,\to}        &= \sum_{j=1}^{i}\tfrac{1}{A_j}\bm{Z}_j, \\
-  \bm{H}_i^{\,\leftarrow} &= \sum_{j=i}^{L}\tfrac{1}{A_j}\bm{Z}_j, \\
-  \bm{H}_i^{\,\text{bi}}  &= \bm{H}_i^{\,\to} + \bm{H}_i^{\,\leftarrow} - \tfrac{1}{A_i}\bm{Z}_i
-                          \;=\; \sum_{j=1}^{L}\tfrac{1}{A_j}\bm{Z}_j. \label{eq:nc-bi}
-\end{align}
-The $-\tfrac{1}{A_i}\bm{Z}_i$ correction removes the double counting
-of $j=i$. The last equality is the key observation of
-\cite{vssd}: the bidirectional NC-SSD hidden state is
-\emph{independent of $i$}. Writing
-\begin{equation}\label{eq:nc-H}
-  \bm{H} \;:=\; \sum_{j=1}^{L}\tfrac{1}{A_j}\bm{Z}_j
-       \;=\; \sum_{j=1}^{L}\tfrac{1}{A_j}\,\bm{B}_j\,\bm{x}_j^\top
-       \;\in\;\mathbb{R}^{N\times D},
-\end{equation}
-every output token reads from the \emph{same} compressed context
-$\bm{H}$. \cite{vssd}~eq.~(8) further notes that the self-term
-$\tfrac{1}{A_i}\bm{Z}_i$ is redundant with the block's skip
-connection, so in practice one keeps the simpler global form
-\eqref{eq:nc-H} and skips the correction.
-
-\subsection{Closed form: $\bm{Y} = \bm{C}\bigl((\bm{B}\odot\bm{m})^\top\bm{X}\bigr)$}
-
-Let $\bm{m}\in\mathbb{R}^{L}$ with $m_j := 1/A_j$, and write $\bm{B}\odot\bm{m}$
-for the matrix whose $j$-th row is $m_j\,\bm{B}_j$ (i.e.\ $\bm{m}$
-broadcast along the $N$-axis). The output equation
-$\bm{y}_t = \bm{C}_t^\top\bm{H}$ stacks to
-\begin{equation}\label{eq:nc-Y}
-  \boxed{\;\bm{Y} \;=\; \bm{C}\,\bm{H} \;=\; \bm{C}\bigl((\bm{B}\odot\bm{m})^\top\bm{X}\bigr),\;}
-\end{equation}
-which is \cite{vssd}~eq.~(10). Shape check:
-$(\bm{B}\odot\bm{m})^\top\in\mathbb{R}^{N\times L}$, $\bm{X}\in
-\mathbb{R}^{L\times D}$, product is $\mathbb{R}^{N\times D}$, and
-$\bm{C}\in\mathbb{R}^{L\times N}$ times that is
-$\mathbb{R}^{L\times D}$, as required.
-
-Comparing \eqref{eq:nc-Y} with the SSD identity
-\eqref{eq:ssd-derived},
-\begin{equation}
-  \bm{Y}_{\text{SSD}} \;=\; \bigl(\bm{L}\odot\bm{C}\bm{B}^\top\bigr)\bm{X},
-  \qquad
-  \bm{Y}_{\text{NC-SSD}} \;=\; \bm{C}\bigl((\bm{B}\odot\bm{m})^\top\bm{X}\bigr),
-\end{equation}
-the $T\times T$ structured mask $\bm{L}$ has been replaced by a
-$T$-vector $\bm{m}$ that column-scales $\bm{B}$. The two operations
-are no longer of the same shape:
-\begin{itemize}
-  \item SSD pays $O(T^2 N)$ to form $\bm{L}\odot\bm{C}\bm{B}^\top$,
-        then $O(T^2 D)$ to multiply by $\bm{X}$, with state of size
-        $\bm{L}$ ($\Theta(T^2)$ if materialized).
-  \item NC-SSD pays $O(TND)$ to form $\bm{H}$, then $O(TND)$ for
-        $\bm{C}\bm{H}$, with state of size $\bm{H}\in\mathbb{R}^{N\times D}$
-        ($O(ND)$, \emph{independent of $T$}).
-\end{itemize}
-The price is uniformity: every query reads the same global summary
-$\bm{H}$, so the per-pair relative weight that $\bm{L}_{ij}$ encodes
-in SSD is gone. \cite{vssd} argues this is a correct trade for
-images, where no $1$-D distance is meaningful anyway.
-
-\paragraph{Practical note on parameterization.} \cite{vssd}~\S 3.2
-remarks that since $A_t$ and $1/A_t$ span the same range of values up
-to inversion, it is numerically simpler to learn $\bm{m}$ directly
-(equivalently, to learn $A$ via the existing projection
-\eqref{eq:projA} and then treat its output as $\bm{m}$). The two
-parameterizations differ only in the optimization geometry.
-
-\subsection{Relation to Mamba-3}\label{sec:ncssd-mamba3}
-
-VSSD is built on Mamba-2 (scalar $A$, two-term recurrence). The
-non-causality argument carries over to Mamba-3 unchanged: at the SSD
-level, both Mamba-2's \eqref{eq:L2} and Mamba-3's \eqref{eq:L3} have
-the same shape $\bm{Y} = (\bm{L}\odot\bm{C}\bm{B}^\top)\bm{X}$, and
-setting $\alpha_t \equiv 1$, $\gamma_t \mapsto 1/A_t$, $\beta_t \equiv 0$
-turns \eqref{eq:L3} into the rank-one mask $\bm{L}_{ij} = m_j$, which
-factors out of the Hadamard product:
-\begin{equation}
-  \bm{L}_{ij} = m_j
-  \;\Longrightarrow\;
-  \bm{L}\odot\bm{C}\bm{B}^\top
-     = \bm{C}\,(\bm{B}\odot\bm{m})^\top,
-\end{equation}
-recovering \eqref{eq:nc-Y}. The Mamba-3 extras compose cleanly on top
-of NC-SSD:
-\begin{itemize}
-  \item The RoPE trick of \S\ref{sec:rope} still applies: rotate
-        $\bm{B}_j, \bm{C}_i$ by $\bm{R}_{\le j}, \bm{R}_{\le i}$ before
-        \eqref{eq:nc-Y}, and the inner product
-        $\widetilde{\bm{C}}_i^\top \widetilde{\bm{B}}_j$ carries relative
-        positional information. With the 2-D factorization
-        \eqref{eq:rope2d}, this becomes the 2-D RoPE used by VSSD.
-  \item The MIMO extension of \S\ref{sec:mimo} carries over by
-        replicating \eqref{eq:nc-Y} per head: $\bm{Y}^{(i)} =
-        \bm{C}^{(i)}\bigl((\bm{B}^{(j)}\odot\bm{m})^\top\bm{X}^{(j)}\bigr)$,
-        summed over $j$.
-\end{itemize}
-The trapezoidal three-term form \eqref{eq:rec3} does \emph{not}
-survive the NC reduction: $\beta_t$ implements a two-band relative
-bias that fundamentally depends on $i,j$ separation, which the
-single-vector $\bm{m}$ cannot represent. VSSD-style NC-SSD is thus
-strictly a Mamba-2-style reduction of Mamba-3 — useful when the
-mask's expressivity is not needed (Section~\ref{sec:ncssd-when}).
-
-\subsection{Tensor-contraction algorithm}\label{sec:ncssd-tensor}
-
-\cite{vssd}~eq.~(9) writes \eqref{eq:nc-Y} as three einsum
-contractions, which matches the standard SSD kernel up to one
-collapsing step:
-\begin{align}
-  \bm{Z} &= \mathrm{contract}(LD, LN \to LND)(\bm{X}, \bm{B}), \label{eq:nc-Z}\\
-  \bm{H} &= \mathrm{contract}(L, LND \to ND)(\bm{m}, \bm{Z}), \label{eq:nc-H2}\\
-  \bm{Y} &= \mathrm{contract}(LN, ND \to LD)(\bm{C}, \bm{H}). \label{eq:nc-Y2}
-\end{align}
-Step~\eqref{eq:nc-Z} expands each token to its outer product
-$\bm{B}_j\bm{x}_j^\top$; step~\eqref{eq:nc-H2} reduces the $L$ axis
-into the single global state $\bm{H}$; step~\eqref{eq:nc-Y2} reads
-the state out per query. Compared with SSD's
-$\mathrm{contract}(LL, LDN \to ND)$ (\cite{vssd}~eq.~(9), top), the
-$LL$ mask has degenerated to an $L$-vector and the algorithm has no
-explicit $T\times T$ tensor at any point.
-
-\subsection{The VSSD image block}
-
-The NC-SSD operator \eqref{eq:nc-Y} replaces the SSD kernel inside an
-otherwise standard vision block. Following \cite{vssd}~\S 3.3:
-\begin{enumerate}
-  \item \textbf{Local Perception Unit (LPU)} \cite{vssd}: a depthwise
-        $3{\times}3$ convolution applied to the patch grid before the
-        NC-SSD and again before the FFN, injecting local 2-D
-        inductive bias on top of the global, position-independent
-        NC-SSD context.
-  \item \textbf{Depth-wise conv 1-D $\to$ 2-D.} The causal Conv1D
-        used inside Mamba-2 between the input and the SSD kernel is
-        replaced by a non-causal depth-wise Conv2D with kernel
-        size~$3$, consistent with the model being non-causal.
-  \item \textbf{2-D RoPE on $\bm{B},\bm{C}$.} The factored angle
-        \eqref{eq:rope2d} is applied to $\bm{C}_i$ and $\bm{B}_j$ before
-        the inner product in \eqref{eq:nc-Y}, restoring the spatial
-        relationship between patches that is otherwise lost in the
-        permutation-invariant global state $\bm{H}$. This is the
-        Mamba-3 RoPE trick of \S\ref{sec:rope} applied to the NC-SSD
-        kernel.
-  \item \textbf{FFN, residual, normalization.} A standard
-        Transformer-style FFN follows the NC-SSD; both the NC-SSD and
-        the FFN are wrapped in residual connections, matching the
-        ViT / Swin block layout rather than Mamba's pre-norm SwiGLU
-        layout.
-  \item \textbf{Hybrid with MSA in the last stage.} The four-stage
-        backbone uses NC-SSD blocks in stages~1--3 and standard
-        softmax MSA in the last stage. The rationale is that early
-        stages have many tokens, where the $O(T)$ scaling of NC-SSD
-        dominates; the last stage has few tokens but high-level
-        semantics, where the per-pair adaptivity of softmax MSA pays
-        off.
-  \item \textbf{Overlapped downsampling} between stages, in the
-        style of \cite{vssd}, replaces the non-overlapped patch
-        merging of VMamba.
-\end{enumerate}
-\paragraph{The vector $\bm{m}$ as a saliency map.} Because $\bm{m}\in
-\mathbb{R}^{L}$ acts as the only token-dependent weight in
-\eqref{eq:nc-Y}, it can be visualized as a 2-D heat map over the patch
-grid. Empirically \cite{vssd} report that $\bm{m}$ concentrates on
-the foreground object of the image — i.e.\ NC-SSD ends up learning a
-saliency-like weighting that the SSD mask $\bm{L}$ never makes
-explicit.
-
-\subsection{Worked example: VSSD on one $504\!\times\!504$ image}
-\label{sec:vssd-worked}
-
-Apply \eqref{eq:nc-Y} to the same single image
-$\bm{I}\in\mathbb{R}^{504\times 504\times 3}$, patch $P=14$, $D=384$,
-$H=6$ heads ($d_{\text{head}}=64$), state $N=64$, so that the input to
-the attention layer is the patch-token matrix
-$\bm{X}\in\mathbb{R}^{T\times D}=\mathbb{R}^{1296\times 384}$.
-
-\paragraph{Per-token quantities.}
-The projections produce
-\begin{equation}
-  \bm{B},\bm{C}\in\mathbb{R}^{T\times N}=\mathbb{R}^{1296\times 64},
-  \quad
-  \bm{V}\in\mathbb{R}^{T\times D}=\mathbb{R}^{1296\times 384},
-  \quad
-  \bm{m} = \mathrm{softplus}(A_{\log})\in\mathbb{R}_{>0}^{T}=\mathbb{R}_{>0}^{1296}.
-\end{equation}
-$\bm{V}$ stacks the value-projected rows $\bm{v}_t =
-\mathrm{SiLU}(\bm{W}_V\bm{x}_t)$ — the matrix that enters the NC-SSD
-identity \eqref{eq:nc-Y} (filling its placeholder $\bm{X}$, in the
-sense of the bridge of \S\ref{sec:self}).
-The crucial step is that $\bm{m}$ is a \emph{single positive scalar
-per patch} — independent of the query position. This is the
-degeneration of the $T\!\times\!T$ mask $\bm{L}$ into a single
-$T$-vector that \cite{vssd} exploits.
-
-\paragraph{Hidden state — a global summary of the image.}
-The contracted form \eqref{eq:nc-H2} sums all 1296 patches into one
-small object:
-\begin{equation}\label{eq:vssd-worked-H}
-  \bm{H}
-   \;=\; \sum_{t'=1}^{T} (\bm{B}_{t'}\,m_{t'})\,\bm{v}_{t'}^\top
-   \;\in\;\mathbb{R}^{N\times D} = \mathbb{R}^{64\times 384}.
-\end{equation}
-Total size: $N\!\cdot\!D = 24\,576$ scalars regardless of $T$ — the
-same 24\,576 numbers whether the image is $224^{2}$ ($T\!=\!256$),
-$504^{2}$ ($T\!=\!1296$), or $1008^{2}$ ($T\!=\!5184$). $\bm{H}$ is a
-rank-$N$ compressed picture of the image, weighted by the saliency
-$\bm{m}$.
-
-\paragraph{Per-patch readout.}
-Each output patch then reads from the global summary:
-\begin{equation}\label{eq:vssd-worked-Y}
-  \bm{Y}_t \;=\; \bm{C}_t\,\bm{H}
-  \;\in\;\mathbb{R}^{D},
-  \qquad
-  \bm{Y}\in\mathbb{R}^{T\times D} = \mathbb{R}^{1296\times 384}.
-\end{equation}
-\emph{Output shape equals input shape}: every patch still has one
-$D$-dim feature. The only patch-specific computation at read-out is
-the small product $\bm{C}_t\bm{H}$ ($N\!\cdot\!D$ multiply-adds per
-token). The expensive part — building $\bm{H}$ — was paid once.
-
-\paragraph{Comparing the three operators on this image.}
-On the same $T\!=\!1296$ tokens and same $N, D$:
-\begin{center}
-\begin{tabular}{|l|l|l|l|}
-\hline
- & \textbf{SSD (Mamba-3)} & \textbf{Softmax MSA} & \textbf{NC-SSD (VSSD)} \\ \hline
-Per-pair coupling      & $\bm{L}_{ij}\!\cdot\!\bm{C}_i^\top\bm{B}_j$ & $\mathrm{softmax}(\bm{Q}_i^\top\bm{K}_j)$ & $m_j$ \emph{only} \\ \hline
-State size             & $\Theta(T^2)$ if $\bm{L}$ materialized & $\Theta(T^2)$ & $\Theta(ND) = 24\,576$ \\ \hline
-Cost (this image)      & $O(T^2 N) \approx 1.07\!\times\!10^{8}$ & $O(T^2 D) \approx 6.4\!\times\!10^{8}$ & $O(TND) \approx 3.2\!\times\!10^{7}$ \\ \hline
-Scaling with image side & quadratic in $T$ & quadratic in $T$ & linear in $T$ \\ \hline
-\end{tabular}
-\end{center}
-The NC-SSD column is roughly $20\times$ cheaper than softmax MSA on
-this image and stays linear when the image grows; the cost paid is
-that every output position reads from the \emph{same} summary
-$\bm{H}$, with the only token-dependent weight being the scalar
-$m_{t'}$ in \eqref{eq:vssd-worked-H}.
-
-\subsection{When to use NC-SSD versus bidirectional SSD}
-\label{sec:ncssd-when}
-
-\begin{center}
-\begin{tabular}{|l|l|l|}
-\hline
- & \textbf{Bidirectional SSD} (\S\ref{sec:bidi}) & \textbf{NC-SSD} (this section)\\ \hline
-Mask state         & $O(T^2)$ (or banded fused kernel) & $O(ND)$ \\ \hline
-Compute per layer  & $O(T^2(N+D))\cdot k_{\text{scans}}$ & $O(TND)$ \\ \hline
-Per-pair adaptivity & $\bm{L}_{ij}$ and $\bm{C}_i^\top\bm{B}_j$ & $\bm{C}_i^\top\bm{B}_j$ only \\ \hline
-Position encoding   & decay in $|i-j|$ + RoPE   & RoPE only (decay collapses) \\ \hline
-Mamba-3 $\beta$-band & preserved (two-band mask) & does not survive (\S\ref{sec:ncssd-mamba3}) \\ \hline
-Typical regime      & moderate $T$, structure-rich tokens & long $T$, vision-style tokens \\ \hline
-\end{tabular}
-\end{center}
-The ``Position encoding'' row deserves emphasis, because it is the row most
-easily lost in an experiment. Bidirectional SSD gets relative position from two
-independent sources and NC-SSD from one, so the two operators are only compared
-fairly when RoPE (\S\ref{sec:rope2d}) is actually enabled. Disable it and
-bidirectional still has the decay band to fall back on while NC-SSD has nothing
---- the resulting gap measures the missing positional encoding at least as much
-as it measures the operators. Any benchmark table comparing the two should
-therefore record whether RoPE was on.
-
-The two are not mutually exclusive: a hybrid stack can use NC-SSD in
-the early, high-resolution stages where $T$ dominates the cost, and
-bidirectional SSD (or softmax MSA, as in VSSD) in deeper stages where
-the mask's per-pair weighting matters. For our multi-view setting
-(\S\ref{sec:multiview}), NC-SSD also offers a free state-compressed
-cross-view block: each view's NC-SSD hidden state
-$\bm{H}^{(v)}\in\mathbb{R}^{N\times D}$ is already in the form that
-\eqref{eq:crossA-out} consumes, so cross-view attention reduces to
-$\bm{C}^{q\,\top}\sum_v \bm{H}^{(v)}$ with no additional kernel.
-
 %% ================================================================
-\section{Application: From the Token Tensor to a Segmentation Mask}
+\section{Application 1: Mamba-3 for Segmentation}
+\label{sec:app-seg}
 \label{sec:seg}
 %% ================================================================
 
@@ -1603,7 +1851,7 @@ attention backbone consumes images of size $H\!\times\!W$ with patch
 size $P$ so the grid is $H_p\!\times\!W_p = (H/P)\!\times\!(W/P)$ and
 $T = H_p W_p$.
 
-\subsection{Head A: linear projection $+$ bilinear upsample}
+\subsection{Head A: linear projection \texorpdfstring{$+$}{+} bilinear upsample}
 \label{sec:seg-A}
 
 Following the Segmenter family \cite{vssd}-style minimal head:
@@ -1745,103 +1993,140 @@ downstream pipeline is identical. The only practical differences are:
 \end{itemize}
 
 %% ================================================================
-\section{Implementation Notes}
-\label{sec:impl}
+\section{Application 2: Mamba-3 for Classification}
 %% ================================================================
+\label{sec:cifar}
 
-The derivations above fix the mathematics; three implementation choices decide
-whether a run actually measures it. All three have gone wrong here in ways that
-raised no error: a stale dependency silently swapped which operator was running,
-a precision ``fix'' silently did nothing, and a constructor default silently
-makes two code paths compute different things. They are recorded here rather
-than left implicit in the code.
+CIFAR-10 is the controlled sanity check: small $T$, cheap to run end to end, and a
+setting where a matched-parameter CNN gives an honest upper reference. Two studies
+live here. The first (\S\ref{sec:cifar-setup}--\S\ref{sec:cifar-cnn}) compares four
+operators --- CNN, softmax attention, Mamba-3 SSD, Mamba-3 VSSD --- across three
+training recipes, and its subject is really \emph{recipe robustness}. The second
+(\S\ref{sec:ablation}) fixes one recipe and varies what the operator is made of:
+scan directions against positional encodings, on the current implementation.
 
-\subsection{Numerical precision: bf16 everywhere, fp32 inside the kernel}
-\label{sec:impl-precision}
+We compare CNN (small ResNet), ViT-Tiny + softmax attention, ViT-Tiny
++ Mamba-3 SSD, and ViT-Tiny + Mamba-3 VSSD on CIFAR-10. All four
+share matched parameter budgets ($\sim 2.7$~M) and identical recipes
+per run; only the attention operator inside the ViT differs. Three
+recipes tried: cosine 50-ep (\texttt{lr=1e-3}), mamba-friendly 80-ep
+(\texttt{lr=3e-4, grad\_clip=1.0}), plateau 80-ep (mamba-friendly +
+\texttt{ReduceLROnPlateau}). The strongest recipe for SSD (plateau)
+is shown below as the headline comparison.
 
-Every operator runs under \textbf{bf16} autocast, uniformly --- the same dtype
-for softmax attention, bidirectional SSD and NC-SSD, so an accuracy comparison
-between them is not partly a precision comparison. bf16 rather than fp16 is
-deliberate: the decay factors of \S\ref{sec:decay} enter the mask as a
-\emph{cumulative product} $\prod_{k=j+1}^{i}\alpha_k$ along the sequence, which
-for long $T$ ranges over many orders of magnitude. fp16's 5-bit exponent
-underflows there; bf16 keeps fp32's 8-bit exponent and spends its precision
-instead, which is the right trade for this operator.
+\paragraph{Two generations of numbers, and why they disagree.}
+The four-variant sweep below was measured on the 2026-04 operator: no 2-D RoPE, the
+reference (non-fused) path, and an unpinned \texttt{mamba-ssm} working copy.
+\S\ref{sec:ablation} was measured after 2-D RoPE was added, the fused kernel was
+enabled, and the dependency was pinned as a submodule (\S\ref{sec:impl-pin}). The two
+therefore do not compose, and the $83.66$ in \S\ref{sec:cifar-sweep} in particular did
+\emph{not} reproduce once the dependency was pinned --- that unreproducibility is what
+motivated pinning it. Read \S\ref{sec:cifar-sweep} for the comparison it was built to
+make (SSD against VSSD under identical recipes, which is internally consistent because
+both arms shared the operator version), and \S\ref{sec:ablation} for any absolute
+number.
 
-The fused kernel (\S\ref{sec:impl-kernel}) internally upcasts $\bm{Q},\bm{K},
-\bm{V}$ to fp32 because its accumulators are fp32, and downcasts on the way out.
-That is an internal detail of the same operator, not a departure from the
-uniform bf16 policy.
+\subsection{Setup}
+\label{sec:cifar-setup}
 
-Two traps are worth stating explicitly.
-\begin{itemize}
-  \item \emph{Casting under autocast does nothing.} Writing \verb|x.float()|
-        inside an autocast region does not give an fp32 matmul: autocast
-        re-downcasts the inputs of every matmul and einsum it governs. Forcing
-        fp32 requires opting the region out with
-        \verb|torch.autocast(..., enabled=False)|. A precision ``fix'' that
-        omits this changes nothing and returns bit-identical numbers --- which
-        is easy to misread as evidence that precision was not the problem.
-  \item \emph{The reference path and the kernel are not automatically the same
-        operator.} The PyTorch fallback honours the \verb|row_renorm| flag while
-        the fused kernel silently ignores it. With the constructor default
-        \verb|row_renorm=True| the two paths therefore compute different things.
-        Pass \verb|row_renorm=False| whenever the two are meant to be compared.
-\end{itemize}
+\begin{center}
+\begin{tabular}{lr@{\quad}lr}
+\toprule
+Image                & $32\times 32$  & Token count $T$ & 65 \\
+Patch size $P$       & 4              & Model dim $D$   & 192 \\
+Batch size $B$       & 128            & Depth           & 6 blocks \\
+Heads $H$            & 3              & Head dim        & 64 \\
+SSM state dim $N$    & 64             & Params (all)    & $\sim 2.7$~M \\
+Optimizer            & AdamW (wd=0.05)& Augmentation    & RandomCrop+HFlip \\
+\bottomrule
+\end{tabular}
+\end{center}
 
-\subsection{Fused Triton kernel}
-\label{sec:impl-kernel}
+\subsection{Efficiency (plateau recipe, all four variants)}
 
-Bidirectional SSD runs on the upstream Mamba-3 SISO Triton kernel by default: it
-is both faster than the PyTorch reference path and the path any published
-number should be quoted from. The reference path remains for CPU runs and for
-kernel debugging. NC-SSD never uses it --- \eqref{eq:nc-Y} is two einsums, with
-no mask to fuse.
+\begin{center}
+\IfFileExists{figs/efficiency_comparison.png}
+  {\includegraphics[width=\textwidth]{figs/efficiency_comparison.png}}
+  {\fbox{\parbox{0.9\textwidth}{\centering\itshape efficiency\_comparison.png --- figure
+   generated by the CIFAR harness (result/.../efficiency\_comparison.png); drop it into
+   \texttt{doc/attention/figs/} to embed. See \texttt{src/eval/} for the harness.}}}
+\end{center}
 
-Reaching the kernel needs one piece of plumbing. Upstream's \verb|mamba_ssm|
-package eagerly imports its high-level models from \verb|__init__.py|, and those
-pull in the cute and tilelang backends (\verb|tilelang|, \verb|cutlass|,
-\verb|quack|). Since Python executes a package's \verb|__init__| before any
-submodule, importing the Triton kernel alone would drag in three unrelated
-backends. We instead register \verb|mamba_ssm| as a bare namespace package over
-the upstream directory: every \verb|__init__| between it and
-\verb|ops.triton.mamba3| is empty, so the kernels import while the heavy
-top-level never runs, and those three packages are not dependencies at all.
+\textbf{Reading the bars.} Params are matched. Latency: VSSD
+($9.4$~ms) is $\sim 1.5\times$ faster than SSD ($14.1$~ms); softmax
+and CNN are slightly faster ($7.2$~ms). Peak GPU memory: VSSD
+($127.2$~MiB) matches softmax to within $0.3$~MiB and is $17\%$ below
+SSD ($153.5$~MiB) -- exactly what the theory predicts (VSSD has no
+$T\times T$ mask; state is $\mathcal{O}(N\cdot d)$ per head, not
+$\mathcal{O}(T^2)$). Train wall-clock per epoch: VSSD $9.5$~s vs SSD
+$15.2$~s ($\sim 38\%$ faster).
 
-Note also that the kernel has a built-in 1-D rotary, which we disable by passing
-$\text{Angles}=\bm{0}$; positions are already encoded by the 2-D RoPE applied to
-$\bm{B}$ and $\bm{C}$ upstream of the kernel (\S\ref{sec:rope2d}).
+\subsection{Training dynamics (plateau recipe)}
 
-\subsection{Pinning the upstream dependency}
-\label{sec:impl-pinning}
+\begin{center}
+\IfFileExists{figs/loss_vs_steps.png}
+  {\includegraphics[width=\textwidth]{figs/loss_vs_steps.png}}
+  {\fbox{\parbox{0.9\textwidth}{\centering\itshape loss\_vs\_steps.png --- figure
+   generated by the CIFAR harness; drop it into \texttt{doc/attention/figs/} to embed.}}}
+\end{center}
 
-\verb|third_party/mamba-ssm| is a \textbf{git submodule} on official upstream,
-pinned to a specific commit, and it must stay one. We call upstream's kernels
-directly, so its version is part of our numerical definition: two checkouts of
-this repository that disagree on that commit can disagree on results.
+On this strong recipe SSD (green) reaches the lowest test loss among
+the ViTs; VSSD (red) sits $\sim 0.4$~nats above it. Train loss
+separation shows SSD fits the training data deeper (\texttt{trL}
+$0.16$) than VSSD (\texttt{trL} $0.16$) -- the $-8.6$~pp test-accuracy
+gap is mostly an under-fit, not over-fit, gap.
 
-This is not hypothetical. The directory was previously a symlink to a shared
-local clone, which drifted onto a branch well behind upstream. On that revision
-the kernel's backward pass raised a dtype error, so \verb|Mamba3SelfAttention|
-fell back to the reference path --- slower, and by \S\ref{sec:impl-precision}
-not even the same operator under the default flags. A previously published
-accuracy number stopped reproducing, and because a symlink records no version,
-nothing in the repository said which upstream revision had produced it. Pointing
-at official upstream's latest \verb|main| fixed the kernel outright.
+\subsection{Recipe sweep -- accuracy}
+\label{sec:cifar-sweep}
 
-Practical consequences: bump the pin deliberately and commit it; re-run any
-benchmark whose numbers are still quoted after a bump; and when a measurement
-stops reproducing, check the dependency's log against the date of the
-measurement before suspecting the measurement.
+\begin{center}
+\begin{tabular}{lrrrr}
+\toprule
+Variant            & Cosine 50 & Mamba 80 & Plateau 80 \\
+\midrule
+CNN                & 93.69\%   & 93.16\%  & 91.84\%    \\
+ViT-Tiny + softmax & 82.50\%   & 82.24\%  & 81.23\%    \\
+ViT-Tiny + SSD     & 44.59\%   & 70.04\%  & \textbf{83.66}\%    \\
+ViT-Tiny + VSSD    & \textbf{77.32\%}   & \textbf{73.73\%}  & 75.06\%    \\
+\midrule
+$\Delta$ (VSSD$-$SSD) & $+32.7$~pp & $+3.7$~pp & $-8.6$~pp \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Reading the table.} Two consistent stories: (i) VSSD is much
+more recipe-robust than SSD (swings $73.7$--$77.3\%$ across recipes,
+vs SSD's $44.6$--$83.7\%$); (ii) on the off-the-shelf cosine recipe
+SSD collapses while VSSD does not. SSD only beats VSSD when the
+recipe is specifically tuned for SSD (the plateau setting). CNN wins
+on every recipe -- explained primarily by the inductive bias of
+locality + translation equivariance at $32\times 32$ from scratch
+with weak augmentation (matches the regime where CNNs reign on small
+data).
+
+\subsection{Why CIFAR-10 ViT/Mamba variants can't beat CNN}
+\label{sec:cifar-cnn}
+
+Three reasons stack at this scale: (i) at $50$K images / $32\times 32$
+/ weak augmentation, CNN's locality and translation-equivariance
+priors give it a free generalisation bonus the global-mixing
+architectures must learn from scratch (published ViT-Tiny + Mixup
+reaches $\sim 92\%$, closing the gap with a recipe change rather than
+an architecture change); (ii) at $T=65$, softmax's any-to-any
+per-pair adaptivity is genuinely useful, and VSSD's single global
+hidden state cannot represent it; (iii) SSD's recurrent state acts as
+an implicit regulariser (helps generalisation, caps raw expressiveness).
+The SSM operators' designed advantage is large-$T$ efficiency, not
+small-$T$ accuracy.
 
 %% ================================================================
-\section{Measured: Positional Encoding and Scan Directions}
+\subsection{Positional encoding and scan directions}
 \label{sec:ablation}
 %% ================================================================
 
 The three operators derived above each admit two positional encodings: the
 external 2-D RoPE of \S\ref{sec:rope2d}, applied to $\bm{B}$ and $\bm{C}$ before
-the SSD, and Mamba-3's own complex rotary of \S\ref{sec:impl-precision}, applied
+the SSD, and Mamba-3's own complex-SSM rotary of \S\ref{sec:rope}, applied
 inside the operator. Table~\ref{tab:ablation} is the resulting $3\times3$ grid at
 both sequence lengths, on CIFAR-10 under one fixed recipe (80 epochs at $T{=}65$,
 30 at $T{=}1025$; single seed, no variance bounds), with the softmax and CNN
@@ -1902,7 +2187,245 @@ because the broken configuration did not merely underperform: for the
 whole grid, which is exactly the kind of result that survives review unexamined.
 
 %% ================================================================
-\section{End-to-End Summary}
+%% ================================================================
+%% ================================================================
+\section{Application 3: Mamba-3 for Pose Estimation}
+\label{sec:eth3d}
+%% ================================================================
+
+\emph{Two different ETH3D experiments exist in this project and are easy to
+confuse.} This section is the \textbf{camera-pose} one, scored by
+AUC@30\textdegree, and it failed. \S\ref{sec:eth3d-depth} is the
+\textbf{metric-depth} one, scored by abs.\ rel.\ / RMSE / $\log_{10}$ /
+$\delta{<}1.25$, and that is the experiment the paper's depth table reports.
+They use different scene splits, different losses and different metrics, so a
+result from one carries no information about the other.
+
+We swapped the attention modules in DA-3-SMALL ($16$ layers total: 12
+backbone + 4 camera-encoder) and trained with GT-supervised
+multi-scene loss on a random scene split (seed=42) of all 11 extracted
+ETH3D scenes: 8 train / 3 held-out test. Recipe and split mirror the
+existing \S15.59.8 protocol so SSD and VSSD are directly comparable.
+
+\subsection{Setup (\texorpdfstring{\S}{Sec.}15.59.8 protocol, identical for SSD and VSSD)}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Dataset / scenes      & ETH3D, 11 scenes, 8 train / 3 test (seed 42) \\
+Test scenes           & courtyard, delivery\_area, terrains \\
+Init                  & random (\texttt{install\_mamba3} default init) \\
+Steps                 & 3000 (warmup 100, decay 500) \\
+LRs                   & attn=1e-5, head=5e-5, other=1e-5 \\
+Loss                  & original DA-3 paper $c\cdot|err| - \lambda\log(c)$ \\
+Image size            & 504 \\
+Views per step        & 4 \\
+Checkpoint every      & 500 steps \\
+Metric                & AUC@30$^\circ$ (pose), mean across 3 test scenes \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Results -- both Mamba variants fail to beat zero-shot}
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Variant                                  & Best mean AUC@30$^\circ$ & Best at ckpt & Trajectory   \\
+\midrule
+DA-3-SMALL zero-shot (un-patched, no training) & $\sim 0.66$ (terrains)$^*$ & --        & --           \\
+DA-3 + Mamba-3 SSD (trained, lr1e5)      & $\approx 0.006$           & 2500         & flat near 0  \\
+DA-3 + Mamba-3 VSSD (trained, lr1e5)     & \textbf{0.0645}           & 500          & peak then decline \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent$^*$ Published reference in PLAN.md \S15.59 -- DA-3-SMALL
+zero-shot on \texttt{terrains}. A 3-scene reproduction was attempted
+but the un-patched DA-3 zero-shot eval on \texttt{terrains} hangs in
+the same TSDF retry loop as some trained variants (degenerate-depth
+preflight); the published per-scene number is used here.
+
+\paragraph{Reading the table.}
+\begin{itemize}
+  \item \textbf{Both trained variants fail catastrophically.} Even
+        VSSD's peak ($0.0645$) is $\sim 10\times$ below DA-3 zero-shot
+        ($\sim 0.66$). Training from random init at this recipe
+        \emph{actively hurts} the model relative to using the
+        pretrained DA-3-SMALL weights as-is.
+  \item \textbf{Relative to SSD, VSSD is $\sim 10\times$ better in
+        absolute terms} (peak $0.0645$ vs $\sim 0.006$). VSSD peaks
+        early (ckpt 500) and degrades monotonically afterwards;
+        SSD is flat near zero from the start.
+  \item \textbf{The recipe-robustness observed on CIFAR-10 partly
+        transfers.} On CIFAR's cosine recipe VSSD beat SSD by
+        $+32.7$~pp without collapsing; on ETH3D's lr1e5 recipe VSSD
+        again \emph{visibly trains} (a peak exists) while SSD
+        produces flat-zero metrics. But both still over-fit hard:
+        VSSD's training loss drove to $-14$ (the model collapses
+        toward "no confidence" predictions to satisfy the
+        $-\log(c)$ aleatoric term) while test loss climbed from
+        $18$ to $40$ over the same window.
+\end{itemize}
+
+\paragraph{Diagnosis.}
+The DA-3 task is fundamentally different from CIFAR-10 in two ways
+that both work against from-scratch Mamba initialisation: (i) the
+DA-3 head consumes pretrained backbone features that were optimised
+for softmax attention; random Mamba-3 attentions destroy those
+features within the first $\sim 100$ steps before any compensating
+signal arrives; (ii) the DA-3 paper loss is not regularised against
+the depth-saturation degeneracy that the from-scratch Mamba init
+falls into. PLAN.md \S15.59.8 identifies the same failure mode
+under SSD and proposes feature distillation from a frozen teacher
+(\S15.59.5 plan) or recipe changes as the next steps. VSSD's
+recipe-robustness gain alone is not enough to close the gap; the
+init problem is the bottleneck.
+
+%% ================================================================
+%% ================================================================
+%% ================================================================
+\section{Application 4: Mamba-3 for Metric Depth Estimation}
+\label{sec:eth3d-depth}
+%% ================================================================
+
+This is the experiment behind the depth table in the paper. It is separate from
+the pose experiment of \S\ref{sec:eth3d} in every respect: different split,
+different loss, different metrics.
+
+\subsection{Scene split -- what is trained on and what is not}
+\label{sec:eth3d-depth-split}
+
+The split is by \textbf{scene}, fixed, and not random. Of the 11 extracted
+ETH3D scenes that carry ground-truth depth:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Train} (10 scenes, 374 images) &
+  \texttt{courtyard}, \texttt{delivery\_area}, \texttt{electro},
+  \texttt{facade}, \texttt{kicker}, \\
+ & \texttt{office}, \texttt{pipes}, \texttt{playground},
+  \texttt{relief}, \texttt{relief\_2} \\
+\midrule
+\textbf{Held out} (eval only) & \texttt{terrains} (42 views) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent\textbf{\texttt{terrains} is never trained on, in either phase.} Both
+the distillation phase and the depth fine-tune draw only from the 10 training
+scenes; \texttt{terrains} is touched exclusively by the evaluator. Any future
+change to this harness must preserve that, and a run that cannot demonstrate it
+should not be reported.
+
+\subsection{Two-phase protocol}
+\label{sec:eth3d-depth-protocol}
+
+\paragraph{Phase B -- feature distillation (20\,000 steps).}
+The student is DA3-SMALL with its self-attention replaced by Vision Mamba-3;
+everything else is DA3-SMALL's pretrained weights. The teacher is the
+\emph{unmodified} DA3-SMALL, frozen. The loss matches student to teacher
+features (L2 $+$ cosine) at backbone layers $(5,7,9,11)$ of 12,
+$d_{\text{embed}}=384$. Images at $504^2$, batch 1, chunked SSD
+(\texttt{chunk\_size}=128), lr $3\times10^{-4}$. Augmentation: random crop
+0.6--1.0, horizontal flip $p=0.5$, colour jitter $\pm0.4/0.1$.
+
+\paragraph{Phase C -- GT-supervised depth fine-tune (1\,000 steps).}
+Initialised from the Phase-B checkpoint. Loss is SILog (scale-invariant
+log-RMSE) $+$ edge-aware smoothness against ground-truth depth on the 10
+training scenes. Cosine schedule ending near zero LR at step 1000; bf16
+autocast. Learning rates by group:
+\[
+  \text{lr}_{\text{attn}} = 10^{-5}, \qquad
+  \text{lr}_{\text{bridge}} = 3\times10^{-5}, \qquad
+  \text{lr}_{\text{dpt}} = 10^{-5}.
+\]
+
+\noindent\textbf{The DualDPT depth head is unfrozen in Phase C.} This is
+deliberate --- unfreezing it is the single change that produced the result --- but
+it must be stated whenever the numbers are quoted, because it invalidates the
+tempting claim that the head is frozen at DA3-SMALL's own calibration and that
+matching DA3-SMALL is therefore the best achievable outcome by construction.
+That ceiling argument describes an \emph{earlier} recipe, in which the head was
+frozen; it does not describe this one.
+
+\subsection{Evaluation}
+\label{sec:eth3d-depth-eval}
+
+All four metrics are computed on the 42 held-out \texttt{terrains} views, after
+per-image median scale alignment of prediction to ground truth: absolute
+relative depth error, RMSE, $\log_{10}$, and $\delta{<}1.25$ (all except RMSE
+median-aligned; the acceptance gate for RMSE is defined on the raw value).
+
+\paragraph{The baseline is zero-shot.} DA3-SMALL is evaluated off the shelf,
+with no ETH3D training of any kind. Our student has 20\,000 distillation steps
+plus 1\,000 GT-supervised steps on ETH3D's other 10 scenes. This is a
+fine-tuned-versus-zero-shot comparison across disjoint scenes of one dataset ---
+a legitimate transfer setup, and \emph{not} train-on-test --- but it is not a
+like-for-like backbone comparison, and reporting it as one would overstate the
+result. It is the reason our student can lead on $\delta{<}1.25$ while trailing
+on the other three metrics.
+
+\subsection{Reference numbers (legacy run)}
+\label{sec:eth3d-depth-legacy}
+
+The numbers currently in the paper come from the run recorded as CM22@1000 in
+the retired \texttt{largescale3Dreconstruction\_using\_SSM} repository
+(pipeline \texttt{distill\_cm12/ckpt\_20000.pt} $\rightarrow$
+\texttt{depth\_ft\_cm22/ckpt\_1000.pt}, 2026-04-23):
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+ & abs.\ rel.\,$\downarrow$ & RMSE\,$\downarrow$ & $\log_{10}$\,$\downarrow$ & $\delta{<}1.25$\,$\uparrow$ \\
+\midrule
+DA3-SMALL (zero-shot)     & \textbf{0.0417} & \textbf{0.0796} & \textbf{0.0175} & 0.9743 \\
+Vision Mamba-3 (CM22@1000) & 0.0531 & 0.1012 & 0.0229 & \textbf{0.9972} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent These predate the operator update: they were produced \emph{without}
+2-D RoPE and against an older \texttt{mamba-ssm} kernel. They are recorded here
+as the reference to reproduce, not as a current result.
+
+\subsection{What this repository provides}
+\label{sec:eth3d-depth-harness}
+
+The harness is being ported into this repository from the retired repo's
+\texttt{mamba3\_attn} package, so that the experiment is reproducible from a
+single checkout rather than from a repository that no longer exists. The pieces
+and their roles:
+
+\begin{itemize}
+  \item \textbf{DA3 patching} (\texttt{da3\_adapter.py}, \texttt{patch.py}) ---
+        swaps DA3-SMALL's self-attention for the Vision Mamba-3 operator
+        (implementation notes: \S\ref{sec:impl}), leaving every other weight at its pretrained value.
+  \item \textbf{ETH3D loaders} (\texttt{data/eth3d.py},
+        \texttt{data/eth3d\_multi.py}) --- scene discovery, GT-depth pairing,
+        and the fixed split of \S\ref{sec:eth3d-depth-split}.
+  \item \textbf{Training phases} (\texttt{train/train\_super.py}) --- Phase B is
+        \texttt{-{}-super 1} (DA3-SMALL teacher), Phase C is
+        \texttt{-{}-super 3 -{}-sub 3} (GT supervision, full unfreeze), matching
+        the recipe of \S\ref{sec:eth3d-depth-protocol}.
+  \item \textbf{Depth metrics} (\texttt{eval/metrics.py}) ---
+        \texttt{abs\_relative\_depth\_error}, \texttt{rmse},
+        \texttt{log10\_metric}, \texttt{delta\_threshold}, and
+        \texttt{align\_scale\_median} for the alignment above.
+\end{itemize}
+
+The operator itself is \emph{not} ported: the patched DA3 uses this
+repository's current \texttt{visionmamba3} modules, so the re-run measures the
+updated operator (2-D RoPE, fused Triton kernel, pinned upstream submodule)
+rather than the 2026-04 snapshot that produced the legacy numbers above.
+
+%% ================================================================
+\section{Conclusion}
+%% ================================================================
+
+%% ================================================================
+\subsection{What the derivation gives}
 %% ================================================================
 
 Using only \eqref{eq:ssd-derived}, we have obtained:
@@ -1943,6 +2466,41 @@ cross vs multi-view), and (ii) which structured mask $\bm{L}$ is used
 exponential-trapezoidal rule \eqref{eq:L3} and RoPE trick
 \eqref{eq:complex-rec} then give the mask and the query/key its final,
 expressive form.
+
+%% ================================================================
+\subsection{What the experiments show}
+%% ================================================================
+
+\begin{itemize}
+  \item \textbf{Implementation cost is small.} Given an existing
+        Mamba-3 SSD attention library, adding the VSSD variant was
+        $\sim 150$ lines of new operator code, a thin adapter wrapper,
+        a dispatch flag, plus eval-script auto-detect for ckpt
+        loading. The structural identity \eqref{eq:duality} carries
+        the implementation through with no architectural changes.
+  \item \textbf{On CIFAR-10, VSSD's efficiency win is unconditional}
+        ($\sim 1.5\times$ faster than SSD, $17\%$ less peak memory,
+        matches softmax memory to within $0.3$ MiB) and its accuracy
+        is much more \emph{recipe-robust} than SSD's. SSD only
+        beats VSSD on accuracy when the recipe is specifically tuned
+        for SSD; on off-the-shelf settings, VSSD is the more
+        forgiving operator. Neither beats CNN at this data scale +
+        recipe, as expected.
+  \item \textbf{On ETH3D, the operator change alone is not enough.}
+        Both Mamba-3 variants fail to beat un-patched DA-3 zero-shot
+        from random init under the \S15.59.8 recipe. VSSD is
+        substantially better than SSD in relative terms ($10\times$
+        higher peak) but still $10\times$ worse than zero-shot in
+        absolute terms. The likely root cause is the random Mamba
+        initialisation destroying pretrained DA-3 features faster
+        than the training loss can repair them.
+  \item \textbf{Next steps for the ETH3D direction.} Feature
+        distillation against a frozen DA-3-LARGE teacher
+        (PLAN \S15.59.5) is the path that gives Mamba attention a
+        pretrained-equivalent init. The VSSD operator slots into
+        that pipeline unchanged via
+        \texttt{install\_mamba3(..., variant="vssd")}.
+\end{itemize}
 
 \bibliographystyle{plain}
 \bibliography{references}
