@@ -825,7 +825,7 @@ positional information into cross-attention.
 We now assemble the self- and cross-attention blocks into an image
 model.
 
-\subsection*{Patchification}
+\subsection{Patchification}
 
 Given an image $\bm{I}\in\mathbb{R}^{H\times W\times 3}$, choose a
 patch size $P$ and define $L = (H/P)(W/P)$ patches
@@ -839,9 +839,8 @@ linear map:
 Flattening in row-major order gives a token sequence
 $\bm{x}_1,\dots,\bm{x}_L$. The same block works for $N_v$ views
 stacked as $N_v L$ tokens.
-\addcontentsline{toc}{subsection}{Patchification}
 
-\subsection*{Why a plain causal scan fails on images}
+\subsection{Why a plain causal scan fails on images}
 
 Applying \eqref{eq:self-entry} directly to the flattened sequence
 gives
@@ -852,7 +851,6 @@ i.e.\ each patch only sees patches \emph{earlier in raster order}.
 A patch at the top-right thus never reads from the bottom-left — half
 the image is missing. An image has no natural causal direction, so
 this asymmetry is harmful.
-\addcontentsline{toc}{subsection}{Why a plain causal scan fails on images}
 
 \subsection{Mamba-3's complex-SSM rotary: attention with learned RoPE}
 \label{sec:rope}
