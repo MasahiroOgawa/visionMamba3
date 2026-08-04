@@ -35,6 +35,22 @@ from visionmamba3.vssd_attention import Mamba3VSSDAttention
 VARIANTS = ("cnn", "vit_attn", "vit_mamba3", "vit_mamba3_4dir", "vit_mamba3_vssd")
 _MAMBA3_DIRECTIONS = {"vit_mamba3": 2, "vit_mamba3_4dir": 4}
 
+# Whether Mamba-3's internal complex rotary is on by default, per operator.
+# Measured at T=65 with the rotary's and 2-D RoPE's rotation planes matched:
+#   2-dir    82.71 -> 81.89  (-0.82)
+#   4-dir    83.26 -> 81.47  (-1.79)
+#   NC-SSD   79.40 -> 81.18  (+1.78)
+# The scan operators already carry relative position in the SSD decay mask's
+# |i-j| band, so a second relative encoding is redundant there and only
+# interferes. NC-SSD's mask collapses to a per-token scalar and has no |i-j|
+# term at all, so the rotary is new information for it -- the same reason it
+# gains most from 2-D RoPE. Override per run with --rope-angles/--no-rope-angles.
+_MAMBA3_ROTARY_DEFAULT = {
+    "vit_mamba3": False,
+    "vit_mamba3_4dir": False,
+    "vit_mamba3_vssd": True,
+}
+
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -207,7 +223,7 @@ def _swap_mixer(vit: ViTTiny, make_mixer) -> int:
 
 def build_model(
     variant: str, patch_size: int = 4, num_classes: int = 10, rope: bool = True,
-    fused: bool = True, rope_angles: bool = True,
+    fused: bool = True, rope_angles: bool | None = None,
 ) -> nn.Module:
     """Build a CIFAR-10 classifier for one operator variant.
 
@@ -225,9 +241,9 @@ def build_model(
     init RNG order that keeps the variants comparable.
 
     ``rope_angles`` turns on Mamba-3's own complex-SSM rotary (a learned relative
-    encoding inside the operator). It stacks with ``rope``, which is the external
-    absolute 2-D encoding -- both are kept on, since each adds accuracy and they
-    encode different things.
+    encoding inside the operator), which stacks with ``rope``, the external
+    absolute 2-D encoding. ``None`` takes the per-operator default from
+    ``_MAMBA3_ROTARY_DEFAULT``: it pays for NC-SSD and costs the scan operators.
 
     The scan-direction count comes from the variant name (see ``VARIANTS``).
     NC-SSD has none: its mask collapses, so there is no scan order.
@@ -248,6 +264,8 @@ def build_model(
     # per (dim, max_pos), which every block here hits identically.
     rope_mod = RoPE2D(base_frequency=100.0) if rope else None
     tag = "RoPE2D" if rope else "no RoPE"
+    if rope_angles is None:
+        rope_angles = _MAMBA3_ROTARY_DEFAULT.get(variant, False)
     if variant in _MAMBA3_DIRECTIONS:
         num_directions = _MAMBA3_DIRECTIONS[variant]
         model = Classifier(ViTTiny(patch=patch_size), num_classes)

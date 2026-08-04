@@ -22,27 +22,23 @@ from .mask import (
     build_two_term_mask_rows,
 )
 from .projections import AttentionProjections
+from .rope2d import rotate_pairs
 
 
 def apply_cumulative_rope(t: Tensor, theta: Tensor) -> Tensor:
-    """Rotate state-channel pairs of `t` by per-token cumulative angles `theta`.
+    """Mamba-3's complex-SSM rotary in PyTorch: the reference-path twin of what the
+    Triton kernel does internally from its `Angles` argument.
 
-    This is Mamba-3's complex-SSM rotary written out in PyTorch, and the
-    reference-path twin of what the Triton kernel does internally from its
-    `Angles` argument. Rotating both B and C by their own absolute angle makes
-    the SSD score C_i . B_j depend on the *relative* rotation theta_i - theta_j.
+    Rotating both B and C by their own absolute cumulative angle makes the SSD score
+    C_i . B_j depend on the *relative* rotation theta_i - theta_j. The pair layout
+    comes from `rotate_pairs`, shared with 2-D RoPE so the two rotaries cannot drift
+    into disjoint planes again -- see that function for what happens when they do.
 
     Args:
         t:     (B, H, T, N) state projection, N even.
         theta: (B, H, T, N/2) cumulative angle per channel pair.
     """
-    # Interleaved pairs (t0,t1), (t2,t3), ... -- matching the kernel, which does
-    # `tl.split(tl.reshape(k, [CHUNK_SIZE, HEADDIM_QK // 2, 2]))`. A half-split
-    # convention silently disagrees with it rather than erroring.
-    pairs = t.unflatten(-1, (t.shape[-1] // 2, 2))
-    t0, t1 = pairs[..., 0], pairs[..., 1]
-    cos, sin = torch.cos(theta), torch.sin(theta)
-    return torch.stack([t0 * cos - t1 * sin, t0 * sin + t1 * cos], dim=-1).flatten(-2)
+    return rotate_pairs(t, torch.cos(theta), torch.sin(theta))
 
 
 def ssd_forward(

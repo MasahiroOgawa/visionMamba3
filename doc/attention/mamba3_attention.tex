@@ -3,6 +3,7 @@
 \usepackage[margin=2.5cm]{geometry}
 \usepackage{array}
 \usepackage{bm}
+\usepackage{graphicx}
 
 \title{Self-Attention and Cross-Attention via Mamba-3, and Their Application to Images}
 \author{Masahiro Ogawa}
@@ -1832,6 +1833,73 @@ Practical consequences: bump the pin deliberately and commit it; re-run any
 benchmark whose numbers are still quoted after a bump; and when a measurement
 stops reproducing, check the dependency's log against the date of the
 measurement before suspecting the measurement.
+
+%% ================================================================
+\section{Measured: Positional Encoding and Scan Directions}
+\label{sec:ablation}
+%% ================================================================
+
+The three operators derived above each admit two positional encodings: the
+external 2-D RoPE of \S\ref{sec:rope2d}, applied to $\bm{B}$ and $\bm{C}$ before
+the SSD, and Mamba-3's own complex rotary of \S\ref{sec:impl-precision}, applied
+inside the operator. Table~\ref{tab:ablation} is the resulting $3\times3$ grid at
+both sequence lengths, on CIFAR-10 under one fixed recipe (80 epochs at $T{=}65$,
+30 at $T{=}1025$; single seed, no variance bounds), with the softmax and CNN
+baselines measured alongside for reference. Numbers are generated directly from
+the run directories by \texttt{scripts/make\_ablation\_table.py}; a cell with no
+run prints as ``--'' rather than being filled in.
+
+\begin{table}[htbp]
+\centering
+\caption{Vision Mamba-3 operators against their positional encodings.
+Accuracy is best test accuracy; latency and peak memory are measured at batch 128
+on the same GPU. Two cautions in reading small differences: repeat runs of one
+configuration differed by $0.67$ points, so gaps below $\sim$$0.7$ are not
+meaningful, and every cell is a single seed.}
+\label{tab:ablation}
+\small
+\input{ablation_table}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\linewidth]{ablation_mem_acc.png}
+\caption{Accuracy against peak memory, the trade-off the operators exist to
+change. Colour is the operator family (blue 2-directional, orange 4-directional,
+green NC-SSD), marker is the positional encoding (triangle none, square 2-D RoPE,
+circle both), grey stars are the softmax and CNN baselines. At $T{=}65$ memory is
+almost flat across operators and the plot is effectively an accuracy ranking; at
+$T{=}1025$ the state-space operators separate from softmax attention horizontally,
+which is the property the linear-time recurrence buys.}
+\label{fig:ablation-mem-acc}
+\end{figure}
+
+\paragraph{What the grid shows.}
+The rotary is not a free addition: it helps exactly the operator that has no other
+relative-position signal. At $T{=}65$, adding it on top of 2-D RoPE costs the
+2-directional operator $0.82$ points and the 4-directional one $1.79$, but gains
+NC-SSD $1.78$. That asymmetry follows the derivations rather than contradicting
+them --- the scan operators already carry relative position in the decay mask's
+$|i-j|$ band \eqref{eq:L3}, so a second relative encoding is redundant, whereas
+\S\ref{sec:ncssd-mamba3} shows NC-SSD's mask collapses to a per-token scalar and
+carries no $|i-j|$ term at all. NC-SSD is correspondingly the operator that gains
+most from 2-D RoPE as well ($+3.64$), and it moves $75.76 \to 81.18$ across the
+row. The implementation therefore defaults the rotary on for NC-SSD and off for
+the scan operators.
+
+\paragraph{A trap worth recording.}
+These numbers are the ones measured \emph{after} 2-D RoPE was corrected to pair
+adjacent channels, matching the rotary's convention (\S\ref{sec:rope2d}). Before
+that, the two encodings rotated in disjoint planes; each was self-consistent
+alone, so single-encoding cells were unaffected, but with both enabled the
+composition no longer reduced to a function of $i-j$. Measured as the departure of
+the score matrix from Toeplitz on constant content, the violation was
+$1.3\times10^{-2}$ against $2.2\times10^{-7}$ once matched --- five orders of
+magnitude --- and it cost the 2-directional operator $12$ points ($82.71$ with RoPE
+alone, $81.59$ with the rotary alone, $70.2$ with both). It is worth stating
+because the broken configuration did not merely underperform: for the
+4-directional operator it \emph{over}-performed, reaching the best accuracy in the
+whole grid, which is exactly the kind of result that survives review unexamined.
 
 %% ================================================================
 \section{End-to-End Summary}

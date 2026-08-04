@@ -172,9 +172,10 @@ def main() -> None:
     ap.add_argument("--rope", action=argparse.BooleanOptionalAction, default=True,
                     help="give the mamba mixers 2-D RoPE on B/C. --no-rope reproduces "
                          "the originally published Table 1 rows, which ran without it.")
-    ap.add_argument("--rope-angles", action=argparse.BooleanOptionalAction, default=True,
-                    help="Mamba-3's own complex-SSM rotary inside the operator. "
-                         "Stacks with --rope, which is the external 2-D encoding.")
+    ap.add_argument("--rope-angles", action=argparse.BooleanOptionalAction, default=None,
+                    help="Mamba-3's own complex-SSM rotary inside the operator, which "
+                         "stacks with --rope. Unset means the per-operator default: on "
+                         "for NC-SSD, off for the scan variants (see models.py).")
     ap.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True,
                     help="bf16 autocast, used uniformly across every variant. --no-amp "
                          "trains in fp32, for numerical debugging only.")

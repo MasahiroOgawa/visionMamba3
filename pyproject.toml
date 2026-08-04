@@ -14,6 +14,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=7", "pytest-xdist"]
 eval = [
+    "matplotlib>=3.11.1",
     "pyyaml>=6.0.3",
     "torchvision>=0.27.1",
 ]
