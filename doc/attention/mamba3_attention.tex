@@ -2284,15 +2284,23 @@ which is the property the linear-time recurrence buys.}
 \paragraph{What the grid shows.}
 The rotary is not a free addition: it helps exactly the operator that has no other
 relative-position signal. At $T{=}65$, adding it on top of 2-D RoPE costs the
-2-directional operator $0.82$ points and the 4-directional one $1.79$, but gains
-NC-SSD $1.78$. That asymmetry follows the derivations rather than contradicting
+2-directional operator $0.89$ points and the 4-directional one $1.81$, but gains
+NC-SSD $2.78$. That asymmetry follows the derivations rather than contradicting
 them --- the scan operators already carry relative position in the decay mask's
 $|i-j|$ band \eqref{eq:L3}, so a second relative encoding is redundant, whereas
 \S\ref{sec:ncssd-mamba3} shows NC-SSD's mask collapses to a per-token scalar and
 carries no $|i-j|$ term at all. NC-SSD is correspondingly the operator that gains
-most from 2-D RoPE as well ($+3.64$), and it moves $75.76 \to 81.18$ across the
-row. The implementation therefore defaults the rotary on for NC-SSD and off for
-the scan operators.
+most from 2-D RoPE as well ($+2.64$, against $+2.34$ two-directional and $+1.74$
+four-directional), and it moves $75.76 \to 81.18$ across the row. The
+implementation therefore defaults the rotary on for NC-SSD and off for the scan
+operators.
+
+Two things the grid does \emph{not} establish, both because of the $0.67$-point
+repeat spread in the caption. Four-directional scanning is not shown to beat
+two-directional: their best cells differ by $0.50$, inside the noise. And the
+best cell overall, 4-directional with 2-D RoPE at $83.28$, leads softmax
+attention by $2.36$ --- above the spread, but on a single seed at one recipe, so
+it is a result to reproduce rather than to quote.
 
 \paragraph{A trap worth recording.}
 These numbers are the ones measured \emph{after} 2-D RoPE was corrected to pair
@@ -2302,9 +2310,21 @@ alone, so single-encoding cells were unaffected, but with both enabled the
 composition no longer reduced to a function of $i-j$. Measured as the departure of
 the score matrix from Toeplitz on constant content, the violation was
 $1.3\times10^{-2}$ against $2.2\times10^{-7}$ once matched --- five orders of
-magnitude --- and it cost the 2-directional operator $12$ points ($82.71$ with RoPE
-alone, $81.59$ with the rotary alone, $70.2$ with both). It is worth stating
-because the broken configuration did not merely underperform: for the
+magnitude --- and it cost the 2-directional operator $12$ points: $70.2$ with both
+encodings enabled, against $82.78$ with 2-D RoPE alone and $81.59$ with the rotary
+alone.
+
+All three single-encoding cells were re-measured under the corrected pairing, so
+every cell of Table~\ref{tab:ablation} now comes from one operator build rather
+than being carried over on the argument that the fix could not have touched them.
+Two moved within the repeat spread ($82.71\to82.78$ two-directional,
+$83.26\to83.28$ four-directional); NC-SSD moved $79.40\to78.40$, a full point,
+slightly beyond it. That is broadly the ``unaffected'' the argument predicts, but
+on single seeds it is corroboration rather than proof --- which is the reason for
+re-running them instead of assuming.
+
+The trap is worth recording because the broken configuration did not merely
+underperform: for the
 4-directional operator it \emph{over}-performed, reaching the best accuracy in the
 whole grid, which is exactly the kind of result that survives review unexamined.
 
