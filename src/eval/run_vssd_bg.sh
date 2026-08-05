@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The three VSSD-beta,gamma cells of Table 1 at T=65: no positional encoding,
-# 2-D RoPE, and 2-D RoPE + Mamba-3's complex rotary.
+# The four VSSD-beta,gamma cells of Table 1 at T=65: the 2x2 of {2-D RoPE on/off}
+# x {Mamba-3's complex rotary on/off}.
 #
 # Same recipe and config as every other T=65 row, so the new rows are comparable
 # with the existing nine on everything except parameter count -- VSSD-beta,gamma
@@ -23,7 +23,8 @@ run() {  # run <out-suffix> <rope flag> <rotary flag>
       "$1" "$2" --out "$out" 2>&1 | tee "$out/train.log"
 }
 
-run norope      --no-rope --no-rope-angles
+run norope        --no-rope --no-rope-angles
+run norope_rotary --no-rope --rope-angles
 run rope        --rope    --no-rope-angles
 run rope_rotary --rope    --rope-angles
 echo "=== VSSD-beta,gamma T=65 sweep complete ($(date -Is)) ==="
