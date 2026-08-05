@@ -61,6 +61,15 @@ OP_LABELS = {
 }
 BASE_COLOURS = {"CNN (ResNet)": "black", "Softmax attention": "0.6"}
 
+# Models with no token axis, omitted from the T=1025 panel of the plot. A ResNet does
+# not tokenise, so its "T=1025" entry is the same network as its "T=65" one -- the
+# patch size it was nominally run at changes nothing about it. Plotting it against a
+# sequence length invites reading its memory as a point on the same scaling curve as
+# the attention operators, when the whole question that panel asks is how cost grows
+# with token count. It stays in the T=65 panel, where it is an accuracy reference,
+# and in the table, where its numbers are labelled rather than positioned.
+TOKEN_FREE = {"CNN (ResNet)"}
+
 # (operator, encoding, variant, result dir for T=65, result dir for T=1025)
 # Only post-pairing-fix directories are listed for cells that enable both encodings.
 ROWS = [
@@ -188,21 +197,29 @@ def _legend_handles() -> list[Line2D]:
 def write_plot(rows) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(FIG_W, 4.6))
 
+    # Decide what is drawn first, then derive the axis range from exactly that. If the
+    # range were computed over `rows` instead, a point that is excluded below could
+    # still stretch the axis, leaving empty space no marker explains.
+    plotted = [(idx, op, enc, d)
+               for idx in (0, 1)
+               for op, enc, a, b in rows
+               for d in ((a, b)[idx],)
+               if d is not None and not (idx == 1 and op in TOKEN_FREE)]
+
     # One accuracy scale across both panels: the panels exist to be compared, and
     # per-panel autoscaling silently rescales that comparison -- a point sitting
     # higher in the right panel could be the lower accuracy. The x axes stay
     # independent on purpose; peak memory genuinely differs by ~20x between the two
     # sequence lengths, so a shared memory axis would flatten the T=65 panel to a
     # single vertical line.
-    accs = [d["acc"] for _op, _enc, a, b in rows for d in (a, b) if d is not None]
+    accs = [d["acc"] for _i, _op, _enc, d in plotted]
     pad = 0.04 * (max(accs) - min(accs))
     ylim = (min(accs) - pad, max(accs) + pad)
 
     for ax, idx, title in ((axes[0], 0, r"$T=65$"), (axes[1], 1, r"$T=1025$")):
         ax.set_ylim(*ylim)
-        for op, enc, a, b in rows:
-            d = (a, b)[idx]
-            if d is None:
+        for i, op, enc, d in plotted:
+            if i != idx:
                 continue
             base = op in BASE_COLOURS
             ax.scatter(d["mem"], d["acc"], s=100 if base else 80,

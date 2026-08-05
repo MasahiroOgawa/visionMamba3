@@ -2334,7 +2334,10 @@ $T{=}65$ memory is almost flat across operators and the plot is effectively an
 accuracy ranking; at $T{=}1025$ the state-space operators separate from softmax
 attention horizontally, which is the property the linear-time recurrence buys. The
 shared axis is stretched by one point, VSSD-$\gamma$ with both encodings at $18.94$
-(\S\ref{sec:ablation}), which compresses the rest.}
+(\S\ref{sec:ablation}), which compresses the rest. The CNN appears only in the
+$T{=}65$ panel: it does not tokenise, so it has no token count for the right panel to
+place it at, and its memory does not sit on the same scaling curve the panel is
+about. Its numbers at both settings remain in Table~\ref{tab:ablation}.}
 \label{fig:ablation-mem-acc}
 \end{figure}
 
