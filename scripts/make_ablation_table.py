@@ -28,6 +28,7 @@ the mismatched rotation planes destroyed the relative-position property (see
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
@@ -168,34 +169,89 @@ def write_table(rows) -> None:
     print(f"wrote {OUT_DIR / 'ablation_table.tex'}")
 
 
-def _legend_handles() -> list[Line2D]:
-    r"""Handles ordered so the two legend columns are the two keys.
+def write_paper_table(rows, out: Path) -> None:
+    r"""Emit the same numbers in the paper's conventions.
 
-    A matplotlib legend fills **column-major**: with ncol=2 and ten entries, the
-    first five become the left column and the last five the right. So the order
-    here is what decides grouping, and the grouping is the point --- "neither
-    encoding" is a value of the positional-encoding key, not a fifth operator, and
-    the "+" in the other three is relative to it. Listing it first in the second
-    column puts it at that column's top, directly above rotary / 2-D RoPE / both.
+    Not a copy of write_table's output: CVIU forbids vertical rules, the paper uses
+    booktabs, and its \texttt{table*} float is ~522pt against this document's 455pt,
+    so units fit back into the headers. Generating both from one ROWS is the point --
+    the paper's Table 1 and this document's cannot then disagree, which they would
+    within a week if the paper's were maintained by hand.
+    """
+    lines = [
+        r"\begin{tabular}{llccccccc}",
+        r"\toprule",
+        r"& & & \multicolumn{3}{c}{$T{=}65$} & \multicolumn{3}{c}{$T{=}1025$} \\",
+        r"\cmidrule(lr){4-6}\cmidrule(lr){7-9}",
+        r"Operator & Enc. & Params (M) & Acc.\,(\%) & Lat.\,(ms) & Mem (MiB)"
+        r" & Acc.\,(\%) & Lat.\,(ms) & Mem (MiB) \\",
+        r"\midrule",
+    ]
+    prev_op = None
+    for op, enc, a, b in rows:
+        if prev_op is not None and op != prev_op:
+            lines.append(r"\midrule")
+        shown = op if op != prev_op else ""
+        prev_op = op
+        params = (a or b or {}).get("params")
+        lines.append(
+            f"{shown} & {enc} & {fmt(params, '.2f')} "
+            f"& {fmt(a and a['acc'], '.2f')} & {fmt(a and a['lat'], '.1f')} & {fmt(a and a['mem'], '.0f')} "
+            f"& {fmt(b and b['acc'], '.2f')} & {fmt(b and b['lat'], '.1f')} & {fmt(b and b['mem'], '.0f')} \\\\"
+        )
+    lines += [r"\bottomrule", r"\end{tabular}"]
+    out.write_text("\n".join(lines) + "\n")
+    print(f"wrote {out}")
 
-    Left column:  the four operators, then one baseline.
-    Right column: the four positional encodings, then the other baseline.
+
+def _legend_handles(grouped_cols: bool = False) -> list[Line2D]:
+    r"""Handles ordered so each legend column is one key.
+
+    A matplotlib legend fills **column-major**, so this order decides the grouping,
+    and the grouping is the point: "neither encoding" is a value of the
+    positional-encoding key, not a fifth operator, and the "+" in the other three is
+    relative to it. It must sit with the encodings, not under the operator list.
+
+    Two layouts, because the column count differs by target. At two columns the split
+    is four operators plus one baseline against four encodings plus the other. At
+    three columns each category gets a column of its own, padded with blank entries
+    so the fill lands where intended -- the paper's float is wide enough for three
+    columns, and three columns is what keeps the figure short enough that the float
+    does not demand a page to itself and get deferred away from its text.
     """
     def mark(marker, face, size, label):
         return Line2D([0], [0], marker=marker, linestyle="", markerfacecolor=face,
                       markeredgecolor="black", markersize=size, label=label)
 
-    # Baselines split one-per-column to keep the columns equal length; slicing rather
-    # than indexing so a third baseline would join a column instead of vanishing.
+    def blank():
+        return Line2D([], [], linestyle="none", marker="none", label=" ")
+
+    ops = [mark("o", OP_COLOURS[k], 8, OP_LABELS[k]) for k in OP_COLOURS]
+    encs = [mark(ENC_MARKERS[k], "0.75", 8, ENC_LABELS[k]) for k in (NONE, ROT, ROPE, BOTH)]
     bases = [mark("*", v, 11, k) for k, v in BASE_COLOURS.items()]
-    left = [mark("o", OP_COLOURS[k], 8, OP_LABELS[k]) for k in OP_COLOURS] + bases[:1]
-    right = ([mark(ENC_MARKERS[k], "0.75", 8, ENC_LABELS[k]) for k in (NONE, ROT, ROPE, BOTH)]
-             + bases[1:])
-    return left + right
+
+    if grouped_cols:
+        rows = max(len(ops), len(encs), len(bases))
+        pad = lambda xs: xs + [blank()] * (rows - len(xs))  # noqa: E731
+        return pad(ops) + pad(encs) + pad(bases)
+    # Baselines split one per column to keep the two columns equal length; sliced
+    # rather than indexed so a third baseline would join a column, not vanish.
+    return ops + bases[:1] + encs + bases[1:]
 
 
-def write_plot(rows) -> None:
-    fig, axes = plt.subplots(1, 2, figsize=(FIG_W, 4.6))
+def write_plot(rows, out: Path = None, fig_w: float = None,
+               fig_h: float = 4.6, legend_cols: int = 2, bottom: float = 0.46) -> None:
+    """Draw accuracy against peak memory.
+
+    `legend_cols` and `fig_h` travel together. The legend is the tall part of this
+    figure, so its column count sets the height: at this document's 360pt only two
+    columns fit, giving five rows, but the paper's table* float is wider and takes
+    four columns in three rows. That matters beyond aesthetics -- at five rows the
+    whole float needs a page of its own, and LaTeX then defers it several pages past
+    the text that introduces it.
+    """
+    out = out or (OUT_DIR / "ablation_mem_acc.png")
+    fig, axes = plt.subplots(1, 2, figsize=(fig_w or FIG_W, fig_h))
 
     # Decide what is drawn first, then derive the axis range from exactly that. If the
     # range were computed over `rows` instead, a point that is excluded below could
@@ -237,21 +293,39 @@ def write_plot(rows) -> None:
     # the FIG_W == \linewidth point-for-point match every font size above relies
     # on. 2 columns fits inside the subplots' own width, so nothing overflows and
     # bbox_inches=None (below) saves at exactly figsize, no surprise rescale.
-    fig.legend(handles=_legend_handles(), loc="lower center", ncol=2, fontsize=10,
+    fig.legend(handles=_legend_handles(grouped_cols=legend_cols == 3), loc="lower center", ncol=legend_cols, fontsize=10,
                frameon=False, bbox_to_anchor=(0.5, 0.0),
                columnspacing=1.2, handletextpad=0.5)
-    fig.subplots_adjust(left=0.13, right=0.98, top=0.90, bottom=0.46, wspace=0.45)
-    out = OUT_DIR / "ablation_mem_acc.png"
+    fig.subplots_adjust(left=0.13, right=0.98, top=0.90, bottom=bottom, wspace=0.45)
     fig.savefig(out, dpi=300)
     plt.close(fig)
     print(f"wrote {out}")
 
 
+# The paper's table* float spans both columns; its companion plot is included at
+# 0.92\linewidth, matching figs/tab_median.tex. Generating the figure at exactly that
+# width keeps 1 matplotlib pt == 1 printed pt there too. PDF, not PNG: vector output
+# is exempt from the paper's 300-dpi-at-printed-size rule for rasters, which a
+# 1494px PNG would fail at 190mm wide (it lands at ~200 dpi).
+PAPER_FIG_W = 0.92 * 522 / 72.27
+
+
 def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--paper-out", type=Path, default=None,
+                    help="also emit the paper-formatted table and a vector plot here "
+                         "(e.g. ../paper-vmamba3/paper/figs)")
+    args = ap.parse_args()
+
     rows = [(op, enc, cell(d65, v), cell(d1025, v)) for op, enc, v, d65, d1025 in ROWS]
     missing = [f"{op} {enc}" for op, enc, a, b in rows if a is None or b is None]
     write_table(rows)
     write_plot(rows)
+    if args.paper_out:
+        write_paper_table(rows, args.paper_out / "tab_cifar_body.tex")
+        write_plot(rows, args.paper_out / "fig_cifar_mem_acc.pdf", PAPER_FIG_W,
+                   fig_h=3.4, legend_cols=3, bottom=0.50)
     if missing:
         print("\nCells still unmeasured (printed as '--'):")
         for m in missing:
