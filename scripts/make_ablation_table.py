@@ -120,23 +120,41 @@ def fmt(x, spec: str) -> str:
 
 
 def write_table(rows) -> None:
-    # \hline style, matching the tables already in mamba3_attention.tex, so the
-    # doc needs no extra package.
+    r"""Emit the tabular, sized to fit \textwidth.
+
+    Three things keep it inside the text block, which it overflowed by 77pt once the
+    T=1025 columns held real numbers instead of "--":
+
+    * Units live in the caption, not the headers. "Acc.\,(\%)" is wider than "80.44"
+      and "Lat.\,(ms)" wider than "286.6", so those headers, not the data, were
+      setting two column widths.
+    * \tabcolsep is halved. Nine columns pay it twice each, so the default 6pt spends
+      108pt of the line on padding alone.
+    * The operator name prints once per group rather than on all four of its rows,
+      with the rule between groups instead of between rows. This is for reading, not
+      width -- the column is still as wide as "VSSD-beta,gamma" either way -- but a
+      4x4 factorial reads as four blocks, not sixteen unrelated lines.
+    """
     lines = [
-        r"\begin{tabular}{|l|l|c|ccc|ccc|}",
+        r"{\setlength{\tabcolsep}{3pt}",          # scoped; restored after the group
+        r"\begin{tabular}{|ll|c|ccc|ccc|}",
         r"\hline",
         r" & & & \multicolumn{3}{c|}{$T{=}65$} & \multicolumn{3}{c|}{$T{=}1025$} \\",
-        r"Operator & Enc. & Par.\,(M) & Acc.\,(\%) & Lat.\,(ms) & Mem"
-        r" & Acc.\,(\%) & Lat.\,(ms) & Mem \\ \hline",
+        r"Operator & Enc. & Par. & Acc. & Lat. & Mem & Acc. & Lat. & Mem \\ \hline",
     ]
-    for op, enc, a, b in rows:
+    prev_op = None
+    for i, (op, enc, a, b) in enumerate(rows):
+        if prev_op is not None and op != prev_op:
+            lines.append(r"\hline")
+        shown = op if op != prev_op else ""
+        prev_op = op
         params = (a or b or {}).get("params")
         lines.append(
-            f"{op} & {enc} & {fmt(params, '.2f')} "
+            f"{shown} & {enc} & {fmt(params, '.2f')} "
             f"& {fmt(a and a['acc'], '.2f')} & {fmt(a and a['lat'], '.1f')} & {fmt(a and a['mem'], '.0f')} "
-            f"& {fmt(b and b['acc'], '.2f')} & {fmt(b and b['lat'], '.1f')} & {fmt(b and b['mem'], '.0f')} \\\\ \\hline"
+            f"& {fmt(b and b['acc'], '.2f')} & {fmt(b and b['lat'], '.1f')} & {fmt(b and b['mem'], '.0f')} \\\\"
         )
-    lines += [r"\end{tabular}"]
+    lines += [r"\hline", r"\end{tabular}}"]
     (OUT_DIR / "ablation_table.tex").write_text("\n".join(lines) + "\n")
     print(f"wrote {OUT_DIR / 'ablation_table.tex'}")
 

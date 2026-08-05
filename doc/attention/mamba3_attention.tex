@@ -9,6 +9,11 @@
 \usepackage{hyperref}
 \hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black}
 
+% Long \texttt{} paths and \verb spans cannot hyphenate, so several of them spill
+% into the right margin. Letting TeX stretch inter-word space as a last resort
+% absorbs that instead of printing text past the text block.
+\emergencystretch=6em
+
 \title{Vision Mamba-3: Mamba-3 State-Space Duality as Attention,\\
        Its Non-Causal Extension to Images, and Four Applications}
 \author{Masahiro Ogawa}
@@ -1868,33 +1873,33 @@ measurement before suspecting the measurement.
 %% ================================================================
 
 The repo already had a Mamba-3 SSD attention module
-(\texttt{src/mamba3\_attn/mamba3/self\_attention.py}) and a DA-3
+(\texttt{src/\allowbreak{}mamba3\_\allowbreak{}attn/\allowbreak{}mamba3/\allowbreak{}self\_\allowbreak{}attention.py}) and a DA-3
 adapter (\texttt{da3\_adapter.py}) that swaps it into any block with a
 standard \texttt{(B, T, D)} interface. We added the VSSD operator with
 the same interface so the dispatch site picks between them via a flag.
 
 \paragraph{New code (added in this work).}
 \begin{itemize}
-  \item \texttt{src/mamba3\_attn/mamba3/vssd\_attention.py} -- the
+  \item \texttt{src/\allowbreak{}mamba3\_\allowbreak{}attn/\allowbreak{}mamba3/\allowbreak{}vssd\_\allowbreak{}attention.py} -- the
         VSSD-$\gamma$ operator. Two einsums (no $T\times T$ mask, no
         Triton kernel), 135 lines, CPU-compatible.
-  \item \texttt{src/mamba3\_attn/da3\_adapter.py} -- new
+  \item \texttt{src/\allowbreak{}mamba3\_\allowbreak{}attn/\allowbreak{}da3\_\allowbreak{}adapter.py} -- new
         \texttt{Mamba3VSSDAdapter} wrapper with the same kwargs as
         the existing \texttt{Mamba3Attention} so the DA-3 swap can
         choose between them.
-  \item \texttt{src/mamba3\_attn/patch.py} -- one new
+  \item \texttt{src/\allowbreak{}mamba3\_\allowbreak{}attn/\allowbreak{}patch.py} -- one new
         \texttt{variant="mamba3" \textbar{} "vssd"} kwarg on
-        \texttt{install\_mamba3(...)}; SSD-only flags
-        (\texttt{bidirectional, three\_term, chunk\_size, ...}) are
+        \texttt{install\_\allowbreak{}mamba3(...)}; SSD-only flags
+        (\texttt{bidirectional, three\_\allowbreak{}term, chunk\_\allowbreak{}size, ...}) are
         silently ignored when the VSSD variant is selected.
-  \item \texttt{scripts/cifar10\_compare.py} +
-        \texttt{scripts/plot\_cifar10\_compare.py} -- new
+  \item \texttt{scripts/\allowbreak{}cifar10\_\allowbreak{}compare.py} +
+        \texttt{scripts/\allowbreak{}plot\_\allowbreak{}cifar10\_\allowbreak{}compare.py} -- new
         \texttt{vit\_mamba3\_vssd} variant + matching plot registry.
-  \item \texttt{src/mamba3\_attn/train/train\_super.py} +
-        \texttt{scripts/multi\_scene\_distill.py} --
+  \item \texttt{src/\allowbreak{}mamba3\_\allowbreak{}attn/\allowbreak{}train/\allowbreak{}train\_\allowbreak{}super.py} +
+        \texttt{scripts/\allowbreak{}multi\_\allowbreak{}scene\_\allowbreak{}distill.py} --
         \texttt{--variant} CLI threaded through to the DA-3
         training/eval pipeline.
-  \item \texttt{tests/unit/test\_vssd\_attention.py} -- 7 new unit
+  \item \texttt{tests/\allowbreak{}unit/\allowbreak{}test\_\allowbreak{}vssd\_\allowbreak{}attention.py} -- 7 new unit
         tests (shape, closed-form match, non-causality, 2-D RoPE,
         attn-mask, CPU path). All 60 tests in the suite pass.
 \end{itemize}
@@ -2155,7 +2160,7 @@ We compare CNN (small ResNet), ViT-Tiny + softmax attention, ViT-Tiny
 share matched parameter budgets ($\sim 2.7$~M) and identical recipes
 per run; only the attention operator inside the ViT differs. Three
 recipes tried: cosine 50-ep (\texttt{lr=1e-3}), mamba-friendly 80-ep
-(\texttt{lr=3e-4, grad\_clip=1.0}), plateau 80-ep (mamba-friendly +
+(\texttt{lr=3e-4, grad\_\allowbreak{}clip=1.0}), plateau 80-ep (mamba-friendly +
 \texttt{ReduceLROnPlateau}). The strongest recipe for SSD (plateau)
 is shown below as the headline comparison.
 
@@ -2284,7 +2289,7 @@ Table~\ref{tab:ablation} is the resulting $4\times4$ grid at
 both sequence lengths, on CIFAR-10 under one fixed recipe (80 epochs at $T{=}65$,
 30 at $T{=}1025$; single seed, no variance bounds), with the softmax and CNN
 baselines measured alongside for reference. Numbers are generated directly from
-the run directories by \texttt{scripts/make\_ablation\_table.py}; a cell with no
+the run directories by \texttt{scripts/\allowbreak{}make\_\allowbreak{}ablation\_\allowbreak{}table.py}; a cell with no
 run prints as ``--'' rather than being filled in.
 
 The fourth operator, VSSD-$\beta,\gamma$ (\S\ref{sec:ncssd-beta}), is the one row
@@ -2309,7 +2314,9 @@ configuration differed by $0.67$ points, so gaps below $\sim$$0.7$ are not
 meaningful, and every cell is a single seed. The VSSD-$\beta,\gamma$ rows are not
 parameter-matched with the rest ($2.93$\,M against $2.71$\,M); see the Par.\ column.
 Enc.: ``---'' neither encoding, ``rotary'' Mamba-3's complex rotary alone,
-``2-D RoPE'' the external encoding alone, ``both'' both. Mem is peak memory in MiB.}
+``2-D RoPE'' the external encoding alone, ``both'' both. Units: Par.\ in millions of
+parameters, Acc.\ in \%, Lat.\ in ms, Mem in MiB. An operator's name is printed on the
+first row of its four-cell block only.}
 \label{tab:ablation}
 \small
 \input{ablation_table}
@@ -2448,17 +2455,20 @@ Metric                & AUC@30$^\circ$ (pose), mean across 3 test scenes \\
 
 \subsection{Results -- both Mamba variants fail to beat zero-shot}
 
-\begin{center}
-\begin{tabular}{lrrr}
+\begin{center}\small
+\begin{tabular}{lrrl}
 \toprule
-Variant                                  & Best mean AUC@30$^\circ$ & Best at ckpt & Trajectory   \\
+Variant & Best mean AUC@30$^\circ$ & Best at ckpt & Trajectory \\
 \midrule
-DA-3-SMALL zero-shot (un-patched, no training) & $\sim 0.66$ (terrains)$^*$ & --        & --           \\
-DA-3 + Mamba-3 SSD (trained, lr1e5)      & $\approx 0.006$           & 2500         & flat near 0  \\
-DA-3 + Mamba-3 VSSD (trained, lr1e5)     & \textbf{0.0645}           & 500          & peak then decline \\
+DA-3-SMALL zero-shot$^{\dagger}$ & $\sim 0.66$ (terrains)$^*$ & -- & -- \\
+DA-3 + Mamba-3 SSD & $\approx 0.006$ & 2500 & flat near 0 \\
+DA-3 + Mamba-3 VSSD & \textbf{0.0645} & 500 & peak then decline \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+\noindent{\footnotesize $^{\dagger}$Un-patched, no training. Both Mamba rows are
+trained from random init at lr $10^{-5}$, per the recipe above.}
 
 \noindent$^*$ Published reference in PLAN.md \S15.59 -- DA-3-SMALL
 zero-shot on \texttt{terrains}. A 3-scene reproduction was attempted
@@ -2591,9 +2601,9 @@ on the other three metrics.
 \label{sec:eth3d-depth-legacy}
 
 The numbers currently in the paper come from the run recorded as CM22@1000 in
-the retired \texttt{largescale3Dreconstruction\_using\_SSM} repository
-(pipeline \texttt{distill\_cm12/ckpt\_20000.pt} $\rightarrow$
-\texttt{depth\_ft\_cm22/ckpt\_1000.pt}, 2026-04-23):
+the retired \texttt{largescale3Dreconstruction\_\allowbreak{}using\_\allowbreak{}SSM} repository
+(pipeline \texttt{distill\_\allowbreak{}cm12/\allowbreak{}ckpt\_\allowbreak{}20000.pt} $\rightarrow$
+\texttt{depth\_\allowbreak{}ft\_\allowbreak{}cm22/\allowbreak{}ckpt\_\allowbreak{}1000.pt}, 2026-04-23):
 
 \begin{center}
 \begin{tabular}{lcccc}
@@ -2623,16 +2633,16 @@ and their roles:
         swaps DA3-SMALL's self-attention for the Vision Mamba-3 operator
         (implementation notes: \S\ref{sec:impl}), leaving every other weight at its pretrained value.
   \item \textbf{ETH3D loaders} (\texttt{data/eth3d.py},
-        \texttt{data/eth3d\_multi.py}) --- scene discovery, GT-depth pairing,
+        \texttt{data/eth3d\_\allowbreak{}multi.py}) --- scene discovery, GT-depth pairing,
         and the fixed split of \S\ref{sec:eth3d-depth-split}.
-  \item \textbf{Training phases} (\texttt{train/train\_super.py}) --- Phase B is
+  \item \textbf{Training phases} (\texttt{train/train\_\allowbreak{}super.py}) --- Phase B is
         \texttt{-{}-super 1} (DA3-SMALL teacher), Phase C is
         \texttt{-{}-super 3 -{}-sub 3} (GT supervision, full unfreeze), matching
         the recipe of \S\ref{sec:eth3d-depth-protocol}.
   \item \textbf{Depth metrics} (\texttt{eval/metrics.py}) ---
-        \texttt{abs\_relative\_depth\_error}, \texttt{rmse},
+        \texttt{abs\_\allowbreak{}relative\_\allowbreak{}depth\_\allowbreak{}error}, \texttt{rmse},
         \texttt{log10\_metric}, \texttt{delta\_threshold}, and
-        \texttt{align\_scale\_median} for the alignment above.
+        \texttt{align\_\allowbreak{}scale\_\allowbreak{}median} for the alignment above.
 \end{itemize}
 
 The operator itself is \emph{not} ported: the patched DA3 uses this
@@ -2719,7 +2729,7 @@ expressive form.
         (PLAN \S15.59.5) is the path that gives Mamba attention a
         pretrained-equivalent init. The VSSD operator slots into
         that pipeline unchanged via
-        \texttt{install\_mamba3(..., variant="vssd")}.
+        \texttt{install\_\allowbreak{}mamba3(..., variant="vssd")}.
 \end{itemize}
 
 \bibliographystyle{plain}
