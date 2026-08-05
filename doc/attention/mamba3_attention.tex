@@ -2296,14 +2296,27 @@ The fourth operator, VSSD-$\beta,\gamma$ (\S\ref{sec:ncssd-beta}), is the one ro
 group that is \emph{not} parameter-matched: its second pool is a real second query
 and scalar projection, $2.93$\,M against the others' $2.71$\,M, so it is $8\%$
 larger and its cells should be read against that column rather than against the
-others' accuracies alone. It is included because \S\ref{sec:ncssd-beta} predicts
-something specific and falsifiable here. If the rotary and 2-D RoPE help
+others' accuracies alone. It was included to test a specific prediction of
+\S\ref{sec:ncssd-beta}, and the prediction did not survive. If the encodings help
 VSSD-$\gamma$ mainly by restoring \emph{query-specific} behaviour to an operator
-whose mask collapsed to one shared summary, then a second independently-read pool
-attacks the same deficit by a different route, and the two should overlap: the
-encodings should buy VSSD-$\beta,\gamma$ visibly \emph{less} than the
-$+2.64/+2.78$ they bought VSSD-$\gamma$. If instead they help it just as much, the
-query-specificity account above is wrong, or at least incomplete.
+whose mask collapsed to one shared summary, a second independently-read pool attacks
+the same deficit by another route, so the two should overlap and the encodings should
+buy VSSD-$\beta,\gamma$ visibly \emph{less}. They bought it \emph{more}: $+4.87$ from
+the rotary against VSSD-$\gamma$'s $+3.39$, $+3.99$ from 2-D RoPE against $+2.64$,
+$+6.64$ from both against $+5.42$. All three gaps exceed the $0.95$-point spread that
+compounding two single-seed measurements implies, and all three point the same way.
+
+The overlap argument is therefore not supported --- but neither is its opposite,
+because the comparison has a confound worth naming. VSSD-$\beta,\gamma$ starts lower
+($75.12$ against $75.76$) and the two finish within $0.58$ of each other ($81.76$
+against $81.18$), so both rows look like they are approaching the same ceiling near
+$81.5$, and a larger gain from a lower start is what any ceiling produces regardless
+of mechanism. What the row does establish is simpler and independent of that: at
+$T{=}65$ the second pool buys nothing. Every cell-to-cell difference against
+VSSD-$\gamma$ ($-0.64$, $+0.84$, $+0.71$, $+0.58$) sits at or inside the repeat
+spread, for $8\%$ more parameters. On this evidence VSSD-$\beta,\gamma$ is not worth
+its cost here, and \S\ref{sec:ncssd-beta}'s ``motivated extension, not a proof''
+caveat stands as written.
 
 \begin{table}[htbp]
 \centering
