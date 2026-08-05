@@ -160,20 +160,46 @@ def write_table(rows) -> None:
 
 
 def _legend_handles() -> list[Line2D]:
+    r"""Handles ordered so the two legend columns are the two keys.
+
+    A matplotlib legend fills **column-major**: with ncol=2 and ten entries, the
+    first five become the left column and the last five the right. So the order
+    here is what decides grouping, and the grouping is the point --- "neither
+    encoding" is a value of the positional-encoding key, not a fifth operator, and
+    the "+" in the other three is relative to it. Listing it first in the second
+    column puts it at that column's top, directly above rotary / 2-D RoPE / both.
+
+    Left column:  the four operators, then one baseline.
+    Right column: the four positional encodings, then the other baseline.
+    """
     def mark(marker, face, size, label):
         return Line2D([0], [0], marker=marker, linestyle="", markerfacecolor=face,
                       markeredgecolor="black", markersize=size, label=label)
 
-    return (
-        [mark("o", OP_COLOURS[k], 8, OP_LABELS[k]) for k in OP_COLOURS]
-        + [mark(ENC_MARKERS[k], "0.75", 8, ENC_LABELS[k]) for k in (NONE, ROT, ROPE, BOTH)]
-        + [mark("*", BASE_COLOURS[k], 11, k) for k in BASE_COLOURS]
-    )
+    # Baselines split one-per-column to keep the columns equal length; slicing rather
+    # than indexing so a third baseline would join a column instead of vanishing.
+    bases = [mark("*", v, 11, k) for k, v in BASE_COLOURS.items()]
+    left = [mark("o", OP_COLOURS[k], 8, OP_LABELS[k]) for k in OP_COLOURS] + bases[:1]
+    right = ([mark(ENC_MARKERS[k], "0.75", 8, ENC_LABELS[k]) for k in (NONE, ROT, ROPE, BOTH)]
+             + bases[1:])
+    return left + right
 
 
 def write_plot(rows) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(FIG_W, 4.6))
+
+    # One accuracy scale across both panels: the panels exist to be compared, and
+    # per-panel autoscaling silently rescales that comparison -- a point sitting
+    # higher in the right panel could be the lower accuracy. The x axes stay
+    # independent on purpose; peak memory genuinely differs by ~20x between the two
+    # sequence lengths, so a shared memory axis would flatten the T=65 panel to a
+    # single vertical line.
+    accs = [d["acc"] for _op, _enc, a, b in rows for d in (a, b) if d is not None]
+    pad = 0.04 * (max(accs) - min(accs))
+    ylim = (min(accs) - pad, max(accs) + pad)
+
     for ax, idx, title in ((axes[0], 0, r"$T=65$"), (axes[1], 1, r"$T=1025$")):
+        ax.set_ylim(*ylim)
         for op, enc, a, b in rows:
             d = (a, b)[idx]
             if d is None:
