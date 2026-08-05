@@ -22,12 +22,40 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import torch
 
-from eval.efficiency import count_params, measure
+from eval.efficiency import GpuNotExclusive, count_params, measure
 from eval.models import build_model
+
+
+def wait_for_exclusive_gpu(device: torch.device, timeout_s: int) -> None:
+    """Block until no other process is computing on the GPU.
+
+    assert_gpu_exclusive is a hard failure by design: a one-shot measurement should
+    refuse rather than report a contended timing. But this tool usually runs at the
+    tail of a chain, seconds after a training job exits, and a CUDA context takes a
+    moment to tear down -- so a scripted idle-check can pass and the measurement still
+    collide. That is not hypothetical: it aborted a pass over fifteen directories with
+    a 10 MiB context, i.e. a process merely starting or ending, and wrote nothing.
+
+    Waiting turns that race into a delay. The guard downstream still fires if the GPU
+    never clears, so a genuinely busy machine still refuses instead of lying.
+    """
+    if device.type != "cuda" or timeout_s <= 0:
+        return
+    for waited in range(0, timeout_s, 10):
+        try:
+            from eval.efficiency import assert_gpu_exclusive
+            assert_gpu_exclusive(device)
+            return
+        except GpuNotExclusive:
+            if waited == 0:
+                print("  GPU not exclusive yet; waiting for it to clear...")
+            time.sleep(10)
+    print(f"  still not exclusive after {timeout_s}s; measuring will refuse per cell")
 
 
 def build_matching(variant: str, cfg: dict, state: dict):
@@ -93,11 +121,22 @@ def remeasure_dir(out: Path, device: torch.device, write: bool) -> int:
         model.load_state_dict(state)
         model.eval()
         x = torch.randn(cfg["eff_batch"], 3, 32, 32, device=device)
-        with torch.inference_mode():
-            # Bind the model as a default arg rather than closing over it: the name is
-            # deleted below to free VRAM between variants, and a closure would then be
-            # left pointing at an unbound name.
-            eff = measure(lambda inp, m=model: m(inp), x, device, warmup=3, repeats=10)
+        try:
+            with torch.inference_mode():
+                # Bind the model as a default arg rather than closing over it: the name
+                # is deleted below to free VRAM between variants, and a closure would
+                # then be left pointing at an unbound name.
+                eff = measure(lambda inp, m=model: m(inp), x, device, warmup=3, repeats=10)
+        except GpuNotExclusive as e:
+            # This, not build_matching, is where contention surfaces -- measure() is the
+            # only call here that touches the GPU. Skipping one cell keeps the rest of
+            # the pass, and the cell simply keeps its previous number rather than
+            # gaining a contended one.
+            print(f"  {variant:22s} SKIPPED: {str(e).splitlines()[0]}")
+            del model, x
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+            continue
 
         old = rec.get("efficiency") or {}
         d_lat = eff["latency_ms"] - old.get("latency_ms", float("nan"))
@@ -126,11 +165,14 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("dirs", nargs="+", type=Path, help="run directories to re-measure")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--wait-gpu", type=int, default=600, metavar="SEC",
+                    help="Wait up to SEC for the GPU to become exclusive (0 disables).")
     ap.add_argument("--write", action="store_true",
                     help="update results.json in place (default: report only)")
     args = ap.parse_args()
 
     device = torch.device(args.device)
+    wait_for_exclusive_gpu(device, args.wait_gpu)
     total = 0
     for d in args.dirs:
         print(f"\n{d}")
