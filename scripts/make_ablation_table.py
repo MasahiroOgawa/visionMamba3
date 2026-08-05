@@ -2,7 +2,7 @@
 """Emit the Vision Mamba-3 ablation table and memory-vs-accuracy plot for
 doc/attention/mamba3_attention.tex.
 
-The 3x3 grid is {2-dir, 4-dir, VSSD-gamma} x {no positional encoding, 2-D RoPE,
+The grid is {2-dir, 4-dir, VSSD-gamma, VSSD-beta,gamma} x {no positional encoding, 2-D RoPE,
 2-D RoPE + Mamba-3 rotary}, at both sequence lengths, plus the softmax and CNN
 baselines for context.
 
@@ -44,6 +44,11 @@ ROWS = [
     (r"VSSD-$\gamma$", "vit_mamba3_vssd", "vm3_ablation_patch4_norope", "vm3_t1025_norope"),
     (r"VSSD-$\gamma$, +2-D RoPE", "vit_mamba3_vssd", "vm3_ropeonly_recheck", "vm3_t1025_rope"),
     (r"VSSD-$\gamma$, +2-D RoPE +rotary", "vit_mamba3_vssd", "vm3_interleaved_vit_mamba3_vssd", "vm3_t1025_rope_rotary"),
+    # VSSD-beta,gamma: its own dirs, because it was added after the 3x3 sweep and
+    # is not parameter-matched with the rows above (2.93 M vs 2.71 M).
+    (r"VSSD-$\beta,\gamma$", "vit_mamba3_vssd_bg", "vm3_vssdbg_norope", "vm3_t1025_vssdbg_norope"),
+    (r"VSSD-$\beta,\gamma$, +2-D RoPE", "vit_mamba3_vssd_bg", "vm3_vssdbg_rope", "vm3_t1025_vssdbg_rope"),
+    (r"VSSD-$\beta,\gamma$, +2-D RoPE +rotary", "vit_mamba3_vssd_bg", "vm3_vssdbg_rope_rotary", "vm3_t1025_vssdbg_rope_rotary"),
 ]
 
 
@@ -96,8 +101,10 @@ def write_plot(rows) -> None:
             if d is None:
                 continue
             base = "CNN" in label or "Softmax" in label
-            fam = "2-dir" if "2-dir" in label else "4-dir" if "4-dir" in label else "VSSD"
-            colour = {"2-dir": "#4878CF", "4-dir": "#E06C2B", "VSSD": "#3A9E5C"}.get(fam, "0.35")
+            fam = ("2-dir" if "2-dir" in label else "4-dir" if "4-dir" in label
+                   else "VSSD-bg" if "beta" in label else "VSSD")
+            colour = {"2-dir": "#4878CF", "4-dir": "#E06C2B",
+                      "VSSD": "#3A9E5C", "VSSD-bg": "#8E44AD"}.get(fam, "0.35")
             # Marker encodes the positional encoding: none / RoPE / RoPE+rotary.
             mk = "o" if "rotary" in label else ("s" if "RoPE" in label else "^")
             ax.scatter(d["mem"], d["acc"], s=90, marker="*" if base else mk,

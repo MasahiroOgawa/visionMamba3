@@ -2269,7 +2269,7 @@ small-$T$ accuracy.
 \label{sec:ablation}
 %% ================================================================
 
-The three operators derived above each admit two \emph{different} positional
+The four operators derived above each admit two \emph{different} positional
 encodings --- not two names for the same thing, even though both rotate
 $\bm{B},\bm{C}$ and so look similar in the table below. The external 2-D RoPE of
 \S\ref{sec:rope2d} is a data-\emph{independent} rotation, a fixed function of each
@@ -2278,12 +2278,25 @@ Mamba-3's own complex-SSM rotary of \S\ref{sec:rope} is a data-\emph{dependent}
 rotation instead: a learned per-token angle that accumulates \emph{inside} the
 recurrence, with no direct notion of pixel position at all. Below, rows marked
 ``+2-D RoPE'' have the first on and the second off; ``+2-D RoPE +rotary'' have
-both on. Table~\ref{tab:ablation} is the resulting $3\times3$ grid at
+both on. Table~\ref{tab:ablation} is the resulting $4\times3$ grid at
 both sequence lengths, on CIFAR-10 under one fixed recipe (80 epochs at $T{=}65$,
 30 at $T{=}1025$; single seed, no variance bounds), with the softmax and CNN
 baselines measured alongside for reference. Numbers are generated directly from
 the run directories by \texttt{scripts/make\_ablation\_table.py}; a cell with no
 run prints as ``--'' rather than being filled in.
+
+The fourth operator, VSSD-$\beta,\gamma$ (\S\ref{sec:ncssd-beta}), is the one row
+group that is \emph{not} parameter-matched: its second pool is a real second query
+and scalar projection, $2.93$\,M against the others' $2.71$\,M, so it is $8\%$
+larger and its cells should be read against that column rather than against the
+others' accuracies alone. It is included because \S\ref{sec:ncssd-beta} predicts
+something specific and falsifiable here. If the rotary and 2-D RoPE help
+VSSD-$\gamma$ mainly by restoring \emph{query-specific} behaviour to an operator
+whose mask collapsed to one shared summary, then a second independently-read pool
+attacks the same deficit by a different route, and the two should overlap: the
+encodings should buy VSSD-$\beta,\gamma$ visibly \emph{less} than the
+$+2.64/+2.78$ they bought VSSD-$\gamma$. If instead they help it just as much, the
+query-specificity account above is wrong, or at least incomplete.
 
 \begin{table}[htbp]
 \centering
@@ -2291,7 +2304,9 @@ run prints as ``--'' rather than being filled in.
 Accuracy is best test accuracy; latency and peak memory are measured at batch 128
 on the same GPU. Two cautions in reading small differences: repeat runs of one
 configuration differed by $0.67$ points, so gaps below $\sim$$0.7$ are not
-meaningful, and every cell is a single seed.}
+meaningful, and every cell is a single seed. The VSSD-$\beta,\gamma$ rows are not
+parameter-matched with the rest ($2.93$\,M against $2.71$\,M); see the Params
+column.}
 \label{tab:ablation}
 \small
 \input{ablation_table}
@@ -2302,7 +2317,8 @@ meaningful, and every cell is a single seed.}
 \includegraphics[width=\linewidth]{ablation_mem_acc.png}
 \caption{Accuracy against peak memory, the trade-off the operators exist to
 change. Colour is the operator family (blue 2-directional, orange 4-directional,
-green VSSD-$\gamma$), marker is the positional encoding (triangle none, square 2-D RoPE,
+green VSSD-$\gamma$, purple VSSD-$\beta,\gamma$), marker is the positional encoding
+(triangle none, square 2-D RoPE,
 circle both), grey stars are the softmax and CNN baselines. At $T{=}65$ memory is
 almost flat across operators and the plot is effectively an accuracy ranking; at
 $T{=}1025$ the state-space operators separate from softmax attention horizontally,
