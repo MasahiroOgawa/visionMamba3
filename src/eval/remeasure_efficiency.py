@@ -30,6 +30,36 @@ from eval.efficiency import count_params, measure
 from eval.models import build_model
 
 
+def build_matching(variant: str, cfg: dict, state: dict):
+    """Rebuild the architecture the checkpoint was actually trained with.
+
+    ``results.json`` records the *CLI* value of ``--rope-angles``, which is ``None``
+    when the caller let the per-operator default decide. That default lives in
+    ``_MAMBA3_ROTARY_DEFAULT``, i.e. in today's code, and it has already changed once
+    -- so replaying ``None`` through ``build_model`` can produce a different width
+    than the run being re-measured: the rotary adds ``state_dim/2`` rows to each
+    block's projection, and the mismatch surfaces as a load_state_dict size error.
+
+    So try the recorded value first (nothing changes when the config is unambiguous),
+    then each explicit setting, and keep whichever matches the checkpoint's own
+    shapes. The checkpoint is the only authority on what was trained.
+    """
+    tried = []
+    for ra in (cfg["rope_angles"], False, True):
+        if ra in tried:
+            continue
+        tried.append(ra)
+        model = build_model(variant, patch_size=cfg["patch_size"], rope=cfg["rope"],
+                            fused=cfg["fused"], rope_angles=ra)
+        have = model.state_dict()
+        if all(k in have and have[k].shape == v.shape for k, v in state.items()):
+            return model, ra
+    raise RuntimeError(
+        f"no rope_angles setting in {tried} reproduces {variant}'s checkpoint shapes; "
+        "the checkpoint predates a change this tool cannot infer"
+    )
+
+
 def remeasure_dir(out: Path, device: torch.device, write: bool) -> int:
     rj = out / "results.json"
     if not rj.exists():
@@ -45,12 +75,22 @@ def remeasure_dir(out: Path, device: torch.device, write: bool) -> int:
         if not ckpt.exists():
             print(f"  {variant:22s} no checkpoint -- skipped")
             continue
-        model = build_model(variant, patch_size=cfg["patch_size"], rope=cfg["rope"],
-                            fused=cfg["fused"], rope_angles=cfg["rope_angles"]).to(device)
         # weights_only=True: these checkpoints hold only tensors, a str and a float,
         # so there is no reason to let torch.load unpickle arbitrary objects.
-        state = torch.load(ckpt, map_location=device, weights_only=True)
-        model.load_state_dict(state["state_dict"])
+        state = torch.load(ckpt, map_location=device, weights_only=True)["state_dict"]
+        try:
+            model, used = build_matching(variant, cfg, state)
+        except RuntimeError as e:
+            # One unrebuildable checkpoint must not cost the other cells their
+            # re-measurement: a single mismatch in this loop once aborted a pass over
+            # ten directories, leaving the table half-corrected and nothing written.
+            print(f"  {variant:22s} SKIPPED: {e}")
+            continue
+        if used != cfg["rope_angles"]:
+            print(f"  {variant:22s} note: rebuilt with rope_angles={used}, not the "
+                  f"config's {cfg['rope_angles']!r} (see build_matching)")
+        model = model.to(device)
+        model.load_state_dict(state)
         model.eval()
         x = torch.randn(cfg["eff_batch"], 3, 32, 32, device=device)
         with torch.inference_mode():

@@ -119,9 +119,18 @@ def run_variant(variant: str, args, device: torch.device) -> dict:
     print(f"  efficiency: latency {eff['latency_ms']:.2f} ms  peak {eff['peak_mib']:.1f} MiB "
           f"(B={args.eff_batch}, T={n_tokens})")
 
+    # Record what the rotary *actually* was, read off the built model rather than
+    # from args: --rope-angles is None when the caller lets the per-operator default
+    # decide, and that default is today's code, not this run's. A checkpoint trained
+    # under an older default then rebuilds at the wrong width, which is exactly what
+    # broke a re-measure pass over ten directories (see remeasure_efficiency's
+    # build_matching). Reading it off the model cannot drift.
+    rotary_used = any(getattr(m, "num_rope_angles", 0) > 0 for m in model.modules())
+
     return {
         "variant": variant,
         "params": n_params,
+        "rope_angles_used": rotary_used,
         "best_test_acc": best_acc,
         "final_train_acc": epochs_log[-1]["train_acc"],
         "final_test_acc": epochs_log[-1]["test_acc"],
