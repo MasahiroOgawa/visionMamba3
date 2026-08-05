@@ -29,7 +29,7 @@ attention, so putting it into a vision pipeline is a relabelling exercise plus a
 mask-builder swap. On top of that we build the image operator: two positional
 encodings (Mamba-3's own complex-SSM rotary, and an external 2-D RoPE applied to
 $\bm{B}$ and $\bm{C}$), two- and four-directional scans, and the non-causal collapse
-(NC-SSD, called Visual State Space Duality --- VSSD --- in its source paper) that
+(VSSD-$\gamma$, called Visual State Space Duality --- VSSD --- in its source paper) that
 removes causality without multi-scan. Four applications
 follow --- segmentation-head design, CIFAR-10 classification, ETH3D camera pose, and
 ETH3D metric depth --- each reported with the provenance of its numbers, including
@@ -268,7 +268,7 @@ Using only the objects above, we will:
         self/cross-attention blocks to build an image encoder; then
         combine several views via cross-view attention for the 3-D
         setting (Section~\ref{sec:images}).
-  \item Derive the \emph{non-causal SSD} (NC-SSD) of \cite{vssd}
+  \item Derive the non-causal collapse \emph{VSSD-$\gamma$} of \cite{vssd}
         as an algebraic alternative to bidirectional scans, and show
         that it collapses the structured $T\times T$ mask $\bm{L}$ to
         a single learned $T$-vector $\bm{m}$
@@ -979,7 +979,7 @@ in this note: self-attention (\S\ref{sec:self}) rotates both projections by the
 token's own $(r,c)$; cross-attention (\S\ref{sec:cross}) rotates $\bm{C}^q$ by
 the query-side positions and $\bm{B}^{kv}$ by the key-side positions, so
 \eqref{eq:crossB-out} scores a query against a key by their \emph{relative}
-grid offset; NC-SSD (\S\ref{sec:ncssd}) rotates the same two projections even
+grid offset; VSSD-$\gamma$ (\S\ref{sec:ncssd}) rotates the same two projections even
 though its mask has collapsed. Applying it at the projections rather than inside
 the kernel is what keeps it operator-agnostic --- and it is why the fused kernel
 of \S\ref{sec:impl-kernel} is handed $\text{Angles}=\bm{0}$ to disable its own
@@ -987,12 +987,12 @@ built-in 1-D rotary, which would otherwise rotate twice.
 
 The three operators do not depend on it equally. Bidirectional SSD encodes
 position twice over, once through RoPE and once through the mask's decay in
-$|i-j|$, so it degrades gracefully without RoPE. NC-SSD has no second channel:
+$|i-j|$, so it degrades gracefully without RoPE. VSSD-$\gamma$ has no second channel:
 \S\ref{sec:ncssd-mamba3} shows its $T\times T$ mask collapses to a per-token
 scalar that cannot express any $|i-j|$ dependence, leaving RoPE as its
 \emph{only} source of relative position. Omitting RoPE therefore does not
 penalise the two operators equally, and a comparison run without it understates
-NC-SSD specifically (\S\ref{sec:ncssd-when}).
+VSSD-$\gamma$ specifically (\S\ref{sec:ncssd-when}).
 
 \subsection{Bidirectional scan (forward \texorpdfstring{$+$}{+} reverse)}
 \label{sec:bidi}
@@ -1085,7 +1085,7 @@ contribution to the state no longer depends on \emph{when} it
 arrives, only on its own coefficient $1/A_i$. The mechanism is now
 \emph{self-referential}: each token decides its own weight.
 
-\subsubsection{Bidirectional NC-SSD collapses to a global hidden state}
+\subsubsection{Bidirectional VSSD-$\gamma$ collapses to a global hidden state}
 
 The recurrence \eqref{eq:nc-unroll} is still causal in the sense that
 $\bm{h}_t$ sums only over $i\le t$. Run it once forward and once
@@ -1100,7 +1100,7 @@ outer product appearing in \eqref{eq:Hrec}):
 \end{align}
 The $-\tfrac{1}{A_i}\bm{Z}_i$ correction removes the double counting
 of $j=i$. The last equality is the key observation of
-\cite{vssd}: the bidirectional NC-SSD hidden state is
+\cite{vssd}: the bidirectional VSSD-$\gamma$ hidden state is
 \emph{independent of $i$}. Writing
 \begin{equation}\label{eq:nc-H}
   \bm{H} \;:=\; \sum_{j=1}^{L}\tfrac{1}{A_j}\bm{Z}_j
@@ -1133,7 +1133,7 @@ Comparing \eqref{eq:nc-Y} with the SSD identity
 \begin{equation}
   \bm{Y}_{\text{SSD}} \;=\; \bigl(\bm{L}\odot\bm{C}\bm{B}^\top\bigr)\bm{X},
   \qquad
-  \bm{Y}_{\text{NC-SSD}} \;=\; \bm{C}\bigl((\bm{B}\odot\bm{m})^\top\bm{X}\bigr),
+  \bm{Y}_{\text{VSSD-}\gamma} \;=\; \bm{C}\bigl((\bm{B}\odot\bm{m})^\top\bm{X}\bigr),
 \end{equation}
 the $T\times T$ structured mask $\bm{L}$ has been replaced by a
 $T$-vector $\bm{m}$ that column-scales $\bm{B}$. The two operations
@@ -1142,7 +1142,7 @@ are no longer of the same shape:
   \item SSD pays $O(T^2 N)$ to form $\bm{L}\odot\bm{C}\bm{B}^\top$,
         then $O(T^2 D)$ to multiply by $\bm{X}$, with state of size
         $\bm{L}$ ($O(T^2)$ if materialized).
-  \item NC-SSD pays $O(TND)$ to form $\bm{H}$, then $O(TND)$ for
+  \item VSSD-$\gamma$ pays $O(TND)$ to form $\bm{H}$, then $O(TND)$ for
         $\bm{C}\bm{H}$, with state of size $\bm{H}\in\mathbb{R}^{N\times D}$
         ($O(ND)$, \emph{independent of $T$}).
 \end{itemize}
@@ -1174,7 +1174,7 @@ factors out of the Hadamard product:
      = \bm{C}\,(\bm{B}\odot\bm{m})^\top,
 \end{equation}
 recovering \eqref{eq:nc-Y}. The Mamba-3 extras compose cleanly on top
-of NC-SSD:
+of VSSD-$\gamma$:
 \begin{itemize}
   \item The RoPE trick of \S\ref{sec:rope} still applies: rotate
         $\bm{B}_j, \bm{C}_i$ by $\bm{R}_{\le j}, \bm{R}_{\le i}$ before
@@ -1192,7 +1192,7 @@ survive the NC reduction \emph{as constructed here}
 ($\beta_t\equiv0$ imposed so that $\bm{L}_{ij}=m_j$ falls out
 directly): $\beta_t$ implements a two-band relative bias that
 fundamentally depends on $i,j$ separation, which this single-vector
-$\bm{m}$ cannot represent. VSSD-style NC-SSD is thus strictly a
+$\bm{m}$ cannot represent. VSSD-$\gamma$ is thus strictly a
 Mamba-2-style reduction of Mamba-3 in this form — useful when the
 mask's expressivity is not needed (Section~\ref{sec:ncssd-when}).
 Section~\ref{sec:ncssd-beta} shows that the causal $\beta$-band is in
@@ -1219,14 +1219,14 @@ explicit $T\times T$ tensor at any point.
 
 \subsubsection{The VSSD image block}
 
-The NC-SSD operator \eqref{eq:nc-Y} replaces the SSD kernel inside an
+The VSSD-$\gamma$ operator \eqref{eq:nc-Y} replaces the SSD kernel inside an
 otherwise standard vision block. Following \cite{vssd}~\S 3.3:
 \begin{enumerate}
   \item \textbf{Local Perception Unit (LPU)} \cite{vssd}: a depthwise
         $3{\times}3$ convolution applied to the patch grid before the
-        NC-SSD and again before the FFN, injecting local 2-D
+        VSSD-$\gamma$ and again before the FFN, injecting local 2-D
         inductive bias on top of the global, position-independent
-        NC-SSD context.
+        VSSD-$\gamma$ context.
   \item \textbf{Depth-wise conv 1-D $\to$ 2-D.} The causal Conv1D
         used inside Mamba-2 between the input and the SSD kernel is
         replaced by a non-causal depth-wise Conv2D with kernel
@@ -1236,17 +1236,17 @@ otherwise standard vision block. Following \cite{vssd}~\S 3.3:
         the inner product in \eqref{eq:nc-Y}, restoring the spatial
         relationship between patches that is otherwise lost in the
         permutation-invariant global state $\bm{H}$. This is the
-        Mamba-3 RoPE trick of \S\ref{sec:rope} applied to the NC-SSD
+        Mamba-3 RoPE trick of \S\ref{sec:rope} applied to the VSSD-$\gamma$
         kernel.
   \item \textbf{FFN, residual, normalization.} A standard
-        Transformer-style FFN follows the NC-SSD; both the NC-SSD and
+        Transformer-style FFN follows the VSSD-$\gamma$; both the VSSD-$\gamma$ and
         the FFN are wrapped in residual connections, matching the
         ViT / Swin block layout rather than Mamba's pre-norm SwiGLU
         layout.
   \item \textbf{Hybrid with MSA in the last stage.} The four-stage
-        backbone uses NC-SSD blocks in stages~1--3 and standard
+        backbone uses VSSD-$\gamma$ blocks in stages~1--3 and standard
         softmax MSA in the last stage. The rationale is that early
-        stages have many tokens, where the $O(T)$ scaling of NC-SSD
+        stages have many tokens, where the $O(T)$ scaling of VSSD-$\gamma$
         dominates; the last stage has few tokens but high-level
         semantics, where the per-pair adaptivity of softmax MSA pays
         off.
@@ -1258,17 +1258,17 @@ otherwise standard vision block. Following \cite{vssd}~\S 3.3:
 \mathbb{R}^{L}$ acts as the only token-dependent weight in
 \eqref{eq:nc-Y}, it can be visualized as a 2-D heat map over the patch
 grid. Empirically \cite{vssd} report that $\bm{m}$ concentrates on
-the foreground object of the image — i.e.\ NC-SSD ends up learning a
+the foreground object of the image — i.e.\ VSSD-$\gamma$ ends up learning a
 saliency-like weighting that the SSD mask $\bm{L}$ never makes
 explicit.
 
-\subsubsection{When to use NC-SSD versus bidirectional SSD}
+\subsubsection{When to use VSSD-$\gamma$ versus bidirectional SSD}
 \label{sec:ncssd-when}
 
 \begin{center}
 \begin{tabular}{|l|l|l|}
 \hline
- & \textbf{Bidirectional SSD} (\S\ref{sec:bidi}) & \textbf{NC-SSD} (this section)\\ \hline
+ & \textbf{Bidirectional SSD} (\S\ref{sec:bidi}) & \textbf{VSSD-$\gamma$} (this section)\\ \hline
 Mask state         & $O(T^2)$ (or banded fused kernel) & $O(ND)$ \\ \hline
 Compute per layer  & $O(T^2(N+D))\cdot k_{\text{scans}}$ & $O(TND)$ \\ \hline
 Per-pair adaptivity & $\bm{L}_{ij}$ and $\bm{C}_i^\top\bm{B}_j$ & $\bm{C}_i^\top\bm{B}_j$ only \\ \hline
@@ -1279,19 +1279,19 @@ Typical regime      & moderate $T$, structure-rich tokens & long $T$, vision-sty
 \end{center}
 The ``Position encoding'' row deserves emphasis, because it is the row most
 easily lost in an experiment. Bidirectional SSD gets relative position from two
-independent sources and NC-SSD from one, so the two operators are only compared
+independent sources and VSSD-$\gamma$ from one, so the two operators are only compared
 fairly when RoPE (\S\ref{sec:rope2d}) is actually enabled. Disable it and
-bidirectional still has the decay band to fall back on while NC-SSD has nothing
+bidirectional still has the decay band to fall back on while VSSD-$\gamma$ has nothing
 --- the resulting gap measures the missing positional encoding at least as much
 as it measures the operators. Any benchmark table comparing the two should
 therefore record whether RoPE was on.
 
-The two are not mutually exclusive: a hybrid stack can use NC-SSD in
+The two are not mutually exclusive: a hybrid stack can use VSSD-$\gamma$ in
 the early, high-resolution stages where $T$ dominates the cost, and
 bidirectional SSD (or softmax MSA, as in VSSD) in deeper stages where
 the mask's per-pair weighting matters. For our multi-view setting
-(\S\ref{sec:multiview}), NC-SSD also offers a free state-compressed
-cross-view block: each view's NC-SSD hidden state
+(\S\ref{sec:multiview}), VSSD-$\gamma$ also offers a free state-compressed
+cross-view block: each view's VSSD-$\gamma$ hidden state
 $\bm{H}^{(v)}\in\mathbb{R}^{N\times D}$ is already in the form that
 \eqref{eq:crossA-out} consumes, so cross-view attention reduces to
 $\bm{C}^{q\,\top}\sum_v \bm{H}^{(v)}$ with no additional kernel.
@@ -1301,11 +1301,11 @@ $\bm{C}^{q\,\top}\sum_v \bm{H}^{(v)}$ with no additional kernel.
 \label{sec:ncssd-beta}
 %% ================================================================
 
-Section~\ref{sec:ncssd-mamba3} showed that the single-vector NC-SSD
+Section~\ref{sec:ncssd-mamba3} showed that the single-vector VSSD-$\gamma$
 collapse, built with $\beta_t\equiv0$, reduces Mamba-3 to a
 Mamba-2-style operator. This section asks a sharper question: can the
 collapse be extended to retain some of the $\beta$-band's capacity
-without giving up NC-SSD's $O(ND)$ state? The answer is yes for the
+without giving up VSSD-$\gamma$'s $O(ND)$ state? The answer is yes for the
 causal mask, and yes-with-a-cost for the non-causal one.
 
 \subsubsection{The causal \texorpdfstring{$\bm{L}_3$}{L3} mask is secretly rank-one off the diagonal}
@@ -1331,7 +1331,7 @@ term. In the causal, single-direction case, $\bm{L}_3$ is therefore
 two-band structure of \S\ref{sec:trap} was never a rank obstruction,
 only a bookkeeping one.
 
-Under the NC-SSD reinterpretation ($\alpha_t\equiv1$, so
+Under the VSSD-$\gamma$ reinterpretation ($\alpha_t\equiv1$, so
 $\bar A_t\equiv1$ for all $t$, and $\gamma_j$ identified with
 \S\ref{sec:ncssd}'s own $1/A_j$ --- \emph{not} derived from a real
 decay, exactly as there --- with $\beta_{j+1}$ likewise learned
@@ -1441,7 +1441,7 @@ like every other weight in this document, just with two separate sets
 of weights instead of one shared set. Stacking $\bm{m}^{(1)},\bm{m}^{(2)}$ row-wise gives
 exactly the $2\times L$ matrix this section is named for. Two
 independent state summaries $\bm{H}^{(1)},\bm{H}^{(2)}\in
-\mathbb{R}^{N\times D}$ are needed --- $2\times$ NC-SSD's usual
+\mathbb{R}^{N\times D}$ are needed --- $2\times$ VSSD-$\gamma$'s usual
 $O(ND)$ state and compute, still $O(TND)$ overall, still independent
 of $T$ in memory, and still strictly cheaper than bidirectional SSD's
 $O(T^2(N+D))$ once $T$ is large.
@@ -1742,7 +1742,7 @@ The projections produce
   \bm{m} = \mathrm{softplus}(A_{\log})\in\mathbb{R}_{>0}^{T}=\mathbb{R}_{>0}^{1296}.
 \end{equation}
 $\bm{V}$ stacks the value-projected rows $\bm{v}_t =
-\mathrm{SiLU}(\bm{W}_V\bm{x}_t)$ — the matrix that enters the NC-SSD
+\mathrm{SiLU}(\bm{W}_V\bm{x}_t)$ — the matrix that enters the VSSD-$\gamma$
 identity \eqref{eq:nc-Y} (filling its placeholder $\bm{X}$, in the
 sense of the bridge of \S\ref{sec:self}).
 The crucial step is that $\bm{m}$ is a \emph{single positive scalar
@@ -1782,14 +1782,14 @@ On the same $T\!=\!1296$ tokens and same $N, D$:
 \begin{center}
 \begin{tabular}{|l|l|l|l|}
 \hline
- & \textbf{SSD (Mamba-3)} & \textbf{Softmax MSA} & \textbf{NC-SSD (VSSD)} \\ \hline
+ & \textbf{SSD (Mamba-3)} & \textbf{Softmax MSA} & \textbf{VSSD-$\gamma$} \\ \hline
 Per-pair coupling      & $\bm{L}_{ij}\!\cdot\!\bm{C}_i^\top\bm{B}_j$ & $\mathrm{softmax}(\bm{Q}_i^\top\bm{K}_j)$ & $m_j$ \emph{only} \\ \hline
 State size             & $\Theta(T^2)$ if $\bm{L}$ materialized & $\Theta(T^2)$ & $\Theta(ND) = 24\,576$ \\ \hline
 Cost (this image)      & $O(T^2 N) \approx 1.07\!\times\!10^{8}$ & $O(T^2 D) \approx 6.4\!\times\!10^{8}$ & $O(TND) \approx 3.2\!\times\!10^{7}$ \\ \hline
 Scaling with image side & quadratic in $T$ & quadratic in $T$ & linear in $T$ \\ \hline
 \end{tabular}
 \end{center}
-The NC-SSD column is roughly $20\times$ cheaper than softmax MSA on
+The VSSD-$\gamma$ column is roughly $20\times$ cheaper than softmax MSA on
 this image and stays linear when the image grows; the cost paid is
 that every output position reads from the \emph{same} summary
 $\bm{H}$, with the only token-dependent weight being the scalar
@@ -1811,7 +1811,7 @@ than left implicit in the code.
 \label{sec:impl-precision}
 
 Every operator runs under \textbf{bf16} autocast, uniformly --- the same dtype
-for softmax attention, bidirectional SSD and NC-SSD, so an accuracy comparison
+for softmax attention, bidirectional SSD and VSSD-$\gamma$, so an accuracy comparison
 between them is not partly a precision comparison. bf16 rather than fp16 is
 deliberate: the decay factors of \S\ref{sec:decay} enter the mask as a
 \emph{cumulative product} $\prod_{k=j+1}^{i}\alpha_k$ along the sequence, which
@@ -1846,7 +1846,7 @@ Two traps are worth stating explicitly.
 Bidirectional SSD runs on the upstream Mamba-3 SISO Triton kernel by default: it
 is both faster than the PyTorch reference path and the path any published
 number should be quoted from. The reference path remains for CPU runs and for
-kernel debugging. NC-SSD never uses it --- \eqref{eq:nc-Y} is two einsums, with
+kernel debugging. VSSD-$\gamma$ never uses it --- \eqref{eq:nc-Y} is two einsums, with
 no mask to fuse.
 
 Reaching the kernel needs one piece of plumbing. Upstream's \verb|mamba_ssm|
@@ -1899,7 +1899,7 @@ the same interface so the dispatch site picks between them via a flag.
 \paragraph{New code (added in this work).}
 \begin{itemize}
   \item \texttt{src/mamba3\_attn/mamba3/vssd\_attention.py} -- the
-        NC-SSD operator. Two einsums (no $T\times T$ mask, no
+        VSSD-$\gamma$ operator. Two einsums (no $T\times T$ mask, no
         Triton kernel), 135 lines, CPU-compatible.
   \item \texttt{src/mamba3\_attn/da3\_adapter.py} -- new
         \texttt{Mamba3VSSDAdapter} wrapper with the same kwargs as
@@ -2004,7 +2004,7 @@ encoding).
 %% ================================================================
 
 The attention layers of Sections~\ref{sec:self}--\ref{sec:images} and
-the NC-SSD variant of Section~\ref{sec:ncssd-mamba3} all output a
+the VSSD-$\gamma$ variant of Section~\ref{sec:ncssd-mamba3} all output a
 token tensor of the same shape as their input, $\bm{Y}\in
 \mathbb{R}^{T\times D}$ (for $H,W,P,D,T$ as in
 \S\ref{sec:self-worked}, the working example is
@@ -2137,11 +2137,11 @@ binary cross-entropy on $\bm{M}_q$ (or Dice) for the matched pairs.
 Heads A, B, and C all consume $\bm{Y}\in\mathbb{R}^{T\times D}$ and
 nothing more. Whether $\bm{Y}$ was produced by
 \eqref{eq:self-out} (SSD self-attention), \eqref{eq:bidi4}
-(bidirectional SSD), or \eqref{eq:nc-Y} (NC-SSD / VSSD), the
+(bidirectional SSD), or \eqref{eq:nc-Y} (VSSD-$\gamma$), the
 downstream pipeline is identical. The only practical differences are:
 
 \begin{itemize}
-  \item NC-SSD / VSSD's per-patch saliency
+  \item VSSD-$\gamma$'s per-patch saliency
         $\bm{m}\in\mathbb{R}^{T}$ already concentrates on the
         foreground (\S\ref{sec:vssd-worked}); this provides a useful
         \emph{initial} class-agnostic mask that Head~C can refine
@@ -2153,8 +2153,8 @@ downstream pipeline is identical. The only practical differences are:
         (which has no other position information at the output) and
         less critical for Heads~B/C (which inject position via the
         decoder's spatial structure or query embeddings).
-  \item The cost asymmetry of \S\ref{sec:vssd-worked} — NC-SSD's
-        $O(TND)$ vs softmax MSA's $O(T^2D)$ — propagates: with NC-SSD
+  \item The cost asymmetry of \S\ref{sec:vssd-worked} — VSSD-$\gamma$'s
+        $O(TND)$ vs softmax MSA's $O(T^2D)$ — propagates: with VSSD-$\gamma$
         the bottleneck moves from the backbone to the segmentation
         head, especially Head~B's pyramid, so high-resolution
         segmentation benefits disproportionately from VSSD backbones.
@@ -2292,10 +2292,16 @@ small-$T$ accuracy.
 \label{sec:ablation}
 %% ================================================================
 
-The three operators derived above each admit two positional encodings: the
-external 2-D RoPE of \S\ref{sec:rope2d}, applied to $\bm{B}$ and $\bm{C}$ before
-the SSD, and Mamba-3's own complex-SSM rotary of \S\ref{sec:rope}, applied
-inside the operator. Table~\ref{tab:ablation} is the resulting $3\times3$ grid at
+The three operators derived above each admit two \emph{different} positional
+encodings --- not two names for the same thing, even though both rotate
+$\bm{B},\bm{C}$ and so look similar in the table below. The external 2-D RoPE of
+\S\ref{sec:rope2d} is a data-\emph{independent} rotation, a fixed function of each
+token's $(row,col)$ pixel position, applied \emph{before} the SSD kernel runs.
+Mamba-3's own complex-SSM rotary of \S\ref{sec:rope} is a data-\emph{dependent}
+rotation instead: a learned per-token angle that accumulates \emph{inside} the
+recurrence, with no direct notion of pixel position at all. Below, rows marked
+``+2-D RoPE'' have the first on and the second off; ``+RoPE +rotary'' have both
+on. Table~\ref{tab:ablation} is the resulting $3\times3$ grid at
 both sequence lengths, on CIFAR-10 under one fixed recipe (80 epochs at $T{=}65$,
 30 at $T{=}1025$; single seed, no variance bounds), with the softmax and CNN
 baselines measured alongside for reference. Numbers are generated directly from
@@ -2319,7 +2325,7 @@ meaningful, and every cell is a single seed.}
 \includegraphics[width=\linewidth]{ablation_mem_acc.png}
 \caption{Accuracy against peak memory, the trade-off the operators exist to
 change. Colour is the operator family (blue 2-directional, orange 4-directional,
-green NC-SSD), marker is the positional encoding (triangle none, square 2-D RoPE,
+green VSSD-$\gamma$), marker is the positional encoding (triangle none, square 2-D RoPE,
 circle both), grey stars are the softmax and CNN baselines. At $T{=}65$ memory is
 almost flat across operators and the plot is effectively an accuracy ranking; at
 $T{=}1025$ the state-space operators separate from softmax attention horizontally,
@@ -2331,14 +2337,14 @@ which is the property the linear-time recurrence buys.}
 The rotary is not a free addition: it helps exactly the operator that has no other
 relative-position signal. At $T{=}65$, adding it on top of 2-D RoPE costs the
 2-directional operator $0.89$ points and the 4-directional one $1.81$, but gains
-NC-SSD $2.78$. That asymmetry follows the derivations rather than contradicting
+VSSD-$\gamma$ $2.78$. That asymmetry follows the derivations rather than contradicting
 them --- the scan operators already carry relative position in the decay mask's
 $|i-j|$ band \eqref{eq:L3}, so a second relative encoding is redundant, whereas
-\S\ref{sec:ncssd-mamba3} shows NC-SSD's mask collapses to a per-token scalar and
-carries no $|i-j|$ term at all. NC-SSD is correspondingly the operator that gains
+\S\ref{sec:ncssd-mamba3} shows VSSD-$\gamma$'s mask collapses to a per-token scalar and
+carries no $|i-j|$ term at all. VSSD-$\gamma$ is correspondingly the operator that gains
 most from 2-D RoPE as well ($+2.64$, against $+2.34$ two-directional and $+1.74$
 four-directional), and it moves $75.76 \to 81.18$ across the row. The
-implementation therefore defaults the rotary on for NC-SSD and off for the scan
+implementation therefore defaults the rotary on for VSSD-$\gamma$ and off for the scan
 operators.
 
 Two things the grid does \emph{not} establish, both because of the $0.67$-point
@@ -2364,7 +2370,7 @@ All three single-encoding cells were re-measured under the corrected pairing, so
 every cell of Table~\ref{tab:ablation} now comes from one operator build rather
 than being carried over on the argument that the fix could not have touched them.
 Two moved within the repeat spread ($82.71\to82.78$ two-directional,
-$83.26\to83.28$ four-directional); NC-SSD moved $79.40\to78.40$, a full point,
+$83.26\to83.28$ four-directional); VSSD-$\gamma$ moved $79.40\to78.40$, a full point,
 slightly beyond it. That is broadly the ``unaffected'' the argument predicts, but
 on single seeds it is corroboration rather than proof --- which is the reason for
 re-running them instead of assuming.
@@ -2633,7 +2639,7 @@ Using only \eqref{eq:ssd-derived}, we have obtained:
         \eqref{eq:cvout}-style blocks and cross-view
         \eqref{eq:Lxview} blocks; or the compressed-state cross
         block \eqref{eq:crossA-out} when one side dominates.
-  \item \textbf{Non-causal SSD (VSSD):} reinterpret $A_t$ as a
+  \item \textbf{VSSD-$\gamma$:} reinterpret $A_t$ as a
         current-token weight to obtain \eqref{eq:nc-Y},
         $\bm{Y} = \bm{C}\bigl((\bm{B}\odot\bm{m})^\top\bm{X}\bigr)$,
         which collapses the $T\times T$ mask $\bm{L}$ to a
