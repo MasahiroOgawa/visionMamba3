@@ -2302,18 +2302,27 @@ which is the property the linear-time recurrence buys.}
 \end{figure}
 
 \paragraph{What the grid shows.}
-The rotary is not a free addition: it helps exactly the operator that has no other
-relative-position signal. At $T{=}65$, adding it on top of 2-D RoPE costs the
+The rotary is not a free addition: it helps exactly the operator that otherwise has the
+least way to tell queries apart. At $T{=}65$, adding it on top of 2-D RoPE costs the
 2-directional operator $0.89$ points and the 4-directional one $1.81$, but gains
-VSSD-$\gamma$ $2.78$. That asymmetry follows the derivations rather than contradicting
-them --- the scan operators already carry relative position in the decay mask's
-$|i-j|$ band \eqref{eq:L3}, so a second relative encoding is redundant, whereas
-\S\ref{sec:ncssd-mamba3} shows VSSD-$\gamma$'s mask collapses to a per-token scalar and
-carries no $|i-j|$ term at all. VSSD-$\gamma$ is correspondingly the operator that gains
-most from 2-D RoPE as well ($+2.64$, against $+2.34$ two-directional and $+1.74$
-four-directional), and it moves $75.76 \to 81.18$ across the row. The
-implementation therefore defaults the rotary on for VSSD-$\gamma$ and off for the scan
-operators.
+VSSD-$\gamma$ $2.78$. That asymmetry is \emph{not} about position: the rotary's angle
+$\theta_t=\bm{W}_\theta\bm{x}_t$ \eqref{eq:dtheta} is a function of a token's own
+content only, never its index or grid location, so on its own it carries no
+relative-position information at all. What it does carry is a query-specific rotation
+of $\bm{C}_i$ before the readout, and how much that matters depends on how much
+query-specific behaviour the operator already has elsewhere. The scan operators already
+give every query its own full, per-pair interaction through the mask $L_{ij}$
+\eqref{eq:L3}, so one more content-dependent knob is largely redundant complexity.
+\S\ref{sec:ncssd-mamba3} shows VSSD-$\gamma$'s mask has instead collapsed to a single
+shared summary $\bm{H}$ that every query reads identically, so rotating $\bm{C}_i$ by
+its own content is close to the \emph{only} source of query-specific behaviour it has
+--- which is why it helps so much. 2-D RoPE helps VSSD-$\gamma$ even more for a related
+reason ($+2.64$, against $+2.34$ two-directional and $+1.74$ four-directional): it gives
+the same query-specific rotation of $\bm{C}_i$, plus genuine relative-position
+information that the scan operators already had from their mask's decay and
+VSSD-$\gamma$ had none of at all. Either way, VSSD-$\gamma$ moves $75.76 \to 81.18$
+across the row. The implementation therefore defaults the rotary on for VSSD-$\gamma$
+and off for the scan operators.
 
 Two things the grid does \emph{not} establish, both because of the $0.67$-point
 repeat spread in the caption. Four-directional scanning is not shown to beat
