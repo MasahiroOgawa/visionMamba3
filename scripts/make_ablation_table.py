@@ -297,7 +297,12 @@ def write_plot(rows, out: Path = None, fig_w: float = None,
                frameon=False, bbox_to_anchor=(0.5, 0.0),
                columnspacing=1.2, handletextpad=0.5)
     fig.subplots_adjust(left=0.13, right=0.98, top=0.90, bottom=bottom, wspace=0.45)
-    fig.savefig(out, dpi=300)
+    # Suppress the embedded creation timestamp. Without it every regeneration is a
+    # byte-level diff with identical content, so a tracked artifact always looks
+    # stale and "is the committed figure current?" stops being answerable by
+    # `git status`. PNG has no such field; only the PDF writer takes metadata.
+    meta = {"CreationDate": None} if out.suffix == ".pdf" else {}
+    fig.savefig(out, dpi=300, metadata=meta)
     plt.close(fig)
     print(f"wrote {out}")
 
