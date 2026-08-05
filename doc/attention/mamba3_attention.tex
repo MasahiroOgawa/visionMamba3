@@ -1331,21 +1331,22 @@ two-band structure of \S\ref{sec:trap} was never a rank obstruction,
 only a bookkeeping one.
 
 Under the NC-SSD reinterpretation ($\alpha_t\equiv1$, so
-$\bar A_t\equiv1$ for all $t$, and $\gamma_j,\beta_{j+1}$ learned
-directly rather than derived from a real decay, as already licensed
-by \S\ref{sec:ncssd}'s practical note on parameterization),
-\eqref{eq:L3-rank1} collapses to
+$\bar A_t\equiv1$ for all $t$, and $\gamma_j$ identified with
+\S\ref{sec:ncssd}'s own $1/A_j$ --- \emph{not} derived from a real
+decay, exactly as there --- with $\beta_{j+1}$ likewise learned
+directly), \eqref{eq:L3-rank1} collapses to
 \begin{equation}\label{eq:m-beta-gamma}
-  m_j \;:=\; \gamma_j + \beta_{j+1},
+  m_j \;:=\; \gamma_j + \beta_{j+1} \;=\; \frac{1}{A_j} + \beta_{j+1},
 \end{equation}
-and the causal output is exactly \eqref{eq:nc-Y} with $\bm{m}$
-replaced by this redefinition --- \emph{no} extra state, \emph{no}
-extra parameters beyond the existing $\beta$ projection. Read
-plainly: Section~\ref{sec:ncssd-mamba3}'s claim that ``$\beta$ does
-not survive'' is correct for the construction used there
-($m_j=1/A_j$, $\beta_t\equiv0$ imposed) but not inevitable --- a
-one-line redefinition of $\bm{m}$ recovers the $\beta$-band's causal
-content at zero extra cost.
+i.e.\ \S\ref{sec:ncssd}'s existing $m_j=1/A_j$ with $\beta_{j+1}$
+simply added on top; the $1/A_j$ part is untouched. The causal output
+is exactly \eqref{eq:nc-Y} with $\bm{m}$ replaced by this redefinition
+--- \emph{no} extra state, \emph{no} extra parameters beyond the
+existing $\beta$ projection. Read plainly: Section~\ref{sec:ncssd-mamba3}'s
+claim that ``$\beta$ does not survive'' is correct for the
+construction used there ($m_j=1/A_j$ alone, $\beta_t\equiv0$ imposed)
+but not inevitable --- adding $\beta_{j+1}$ on top of that same
+$1/A_j$ recovers the $\beta$-band's causal content at zero extra cost.
 
 \subsubsection{Why the bidirectional collapse needs two pools, not one}
 
