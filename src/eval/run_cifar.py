@@ -99,10 +99,23 @@ def run_variant(variant: str, args, device: torch.device) -> dict:
 
     model.load_state_dict(best_state)
     model.eval()
+
+    # Release the optimizer and gradients before measuring. They are still resident
+    # from training and land inside the peak-memory scope, so the reported figure was
+    # the *training* footprint, not the inference one: AdamW's two moments plus grads
+    # are 3 fp32 copies of the parameters, which at 2.71 M params inflated peak memory
+    # by 31.1 MiB against a predicted 31.0 (152.5 -> 121.4 MiB on the 2-directional
+    # cell). The offset scales with parameter count, so it barely moved comparisons
+    # between these matched-budget variants, but every absolute number carried it.
+    optimizer.zero_grad(set_to_none=True)
+    del optimizer, train_dl, test_dl
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
     n_tokens = (32 // args.patch_size) ** 2 + 1
     x = torch.randn(args.eff_batch, 3, 32, 32, device=device)
     with torch.inference_mode():
-        eff = measure(lambda inp: model(inp), x, device, warmup=3, repeats=10)
+        eff = measure(lambda inp, m=model: m(inp), x, device, warmup=3, repeats=10)
     print(f"  efficiency: latency {eff['latency_ms']:.2f} ms  peak {eff['peak_mib']:.1f} MiB "
           f"(B={args.eff_batch}, T={n_tokens})")
 
