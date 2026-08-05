@@ -1137,7 +1137,7 @@ are no longer of the same shape:
 \begin{itemize}
   \item SSD pays $O(T^2 N)$ to form $\bm{L}\odot\bm{C}\bm{B}^\top$,
         then $O(T^2 D)$ to multiply by $\bm{X}$, with state of size
-        $\bm{L}$ ($\Theta(T^2)$ if materialized).
+        $\bm{L}$ ($O(T^2)$ if materialized).
   \item NC-SSD pays $O(TND)$ to form $\bm{H}$, then $O(TND)$ for
         $\bm{C}\bm{H}$, with state of size $\bm{H}\in\mathbb{R}^{N\times D}$
         ($O(ND)$, \emph{independent of $T$}).
