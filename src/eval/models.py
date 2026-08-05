@@ -10,7 +10,8 @@ only the token mixer is swapped:
   vit_attn         -> VanillaAttention (softmax)
   vit_mamba3       -> Mamba3SelfAttention, 2-directional (row-major fwd+rev)
   vit_mamba3_4dir  -> Mamba3SelfAttention, 4-directional (+ column-major)
-  vit_mamba3_vssd  -> Mamba3VSSDAttention (NC-SSD, non-causal)
+  vit_mamba3_vssd  -> Mamba3VSSDAttention (VSSD-gamma, non-causal)
+  vit_mamba3_vssd_bg -> Mamba3VSSDBetaGammaAttention (VSSD-beta,gamma; two pools)
 
 The mamba mixers are built exactly as the retired ``da3_adapter`` wrappers
 built them, and are placed as ``block.attn`` in place of the softmax module,
@@ -27,12 +28,16 @@ import torch.nn.functional as F
 # injection needed by the fused SSD kernel path).
 from visionmamba3.rope2d import RoPE2D
 from visionmamba3.self_attention import Mamba3SelfAttention
-from visionmamba3.vssd_attention import Mamba3VSSDAttention
+from visionmamba3.vssd_attention import (
+    Mamba3VSSDAttention,
+    Mamba3VSSDBetaGammaAttention,
+)
 
 # The direction count lives in the variant name rather than in a flag: these are
 # separate Table 1 rows, so a run must be able to produce both in one sweep, and
 # the name is then the single source of truth for what a row measured.
-VARIANTS = ("cnn", "vit_attn", "vit_mamba3", "vit_mamba3_4dir", "vit_mamba3_vssd")
+VARIANTS = ("cnn", "vit_attn", "vit_mamba3", "vit_mamba3_4dir", "vit_mamba3_vssd",
+            "vit_mamba3_vssd_bg")
 _MAMBA3_DIRECTIONS = {"vit_mamba3": 2, "vit_mamba3_4dir": 4}
 
 # Whether Mamba-3's internal complex rotary is on by default, per operator.
@@ -49,6 +54,19 @@ _MAMBA3_ROTARY_DEFAULT = {
     "vit_mamba3": False,
     "vit_mamba3_4dir": False,
     "vit_mamba3_vssd": True,
+    # VSSD-beta,gamma inherits VSSD-gamma's reason for wanting the rotary: both
+    # pools' masks are per-token scalars with no |i-j| term, so the rotary is
+    # still their only relative-position signal. Untested for this variant --
+    # the 3x3 grid measures it.
+    "vit_mamba3_vssd_bg": True,
+}
+
+
+# Both non-causal collapses take the same constructor kwargs and differ only in
+# how many global pools they read, so one build branch serves both.
+_VSSD_CLASSES = {
+    "vit_mamba3_vssd": (Mamba3VSSDAttention, "VSSD-gamma"),
+    "vit_mamba3_vssd_bg": (Mamba3VSSDBetaGammaAttention, "VSSD-beta,gamma"),
 }
 
 
@@ -286,17 +304,18 @@ def build_model(
         print(f"  [{variant}] swapped {n} attention modules -> Mamba3SelfAttention "
               f"({num_directions}-dir SSD, {tag}, {ang}, {kern})")
         return model
-    if variant == "vit_mamba3_vssd":
+    if variant in _VSSD_CLASSES:
+        cls, label = _VSSD_CLASSES[variant]
         model = Classifier(ViTTiny(patch=patch_size), num_classes)
         n = _swap_mixer(
             model.backbone,
-            lambda dim, h: Mamba3VSSDAttention(
+            lambda dim, h: cls(
                 dim, num_heads=h, state_dim=64, out_proj=True, proj_bias=True,
                 rope=rope_mod, rope_angles=rope_angles,
             ),
         )
         ang = "+rotary" if rope_angles else "no rotary"
-        print(f"  [vit_mamba3_vssd] swapped {n} attention modules -> "
-              f"Mamba3VSSDAttention (NC-SSD, {tag}, {ang})")
+        print(f"  [{variant}] swapped {n} attention modules -> "
+              f"{cls.__name__} ({label}, {tag}, {ang})")
         return model
     raise ValueError(f"unknown variant: {variant}")

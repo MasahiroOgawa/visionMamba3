@@ -28,7 +28,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .projections import AttentionProjections
+from .projections import AttentionProjections, BCNorm
 from .self_attention import apply_cumulative_rope
 
 
@@ -116,35 +116,138 @@ class Mamba3VSSDAttention(nn.Module):
         Returns:
             y: (B, T, D).
         """
-        B_t, C_t, V_t, _delta, A_raw, _lam, angles = self.projections(x)
+        B_t, C_t, V_t, m, _rotate = self._project(x, pos, attn_mask)
+        return self._finish(vssd_forward(B_t, C_t, V_t, m))
 
+    # -- shared front/back halves, reused by Mamba3VSSDBetaGammaAttention ------
+
+    def _project(self, x: Tensor, pos: Optional[Tensor], attn_mask: Optional[Tensor]):
+        """Project, apply both positional encodings, and build m.
+
+        Returns ``(B, C, V, m, rotate)``. ``rotate`` replays the *same* rotations
+        B and C received, for operators that add a second query stream. Handing it
+        back rather than letting the caller redo the rotations is deliberate: a
+        second C rotated differently from B would break the relative-position
+        property the rotary exists to provide, and that failure is silent -- it
+        cost the 2-directional operator 12 points before it was found once already
+        (see ``rotate_pairs`` in rope2d.py).
+        """
+        B_t, C_t, V_t, _delta, A_log, _lam, angles = self.projections(x)
+
+        rotations = []
         if angles is not None:
-            # Mamba-3's rotary, adapted to NC-SSD. The SSD form accumulates
+            # Mamba-3's rotary, adapted to the collapse. The SSD form accumulates
             # angle*Delta along the scan, but Delta does not survive the NC
-            # reduction (doc section 6.4), so the increment is unscaled: theta is
+            # reduction (doc section 6.7.4), so the increment is unscaled: theta is
             # a plain cumsum, i.e. position advances one step per token rather
             # than data-dependently. Rotating B and C alike still makes the
             # C_i . B_j score depend on the relative angle, which is the point.
             theta = torch.cumsum(angles, dim=-2)
-            B_t = apply_cumulative_rope(B_t, theta)
-            C_t = apply_cumulative_rope(C_t, theta)
-
+            rotations.append(lambda t: apply_cumulative_rope(t, theta))
         if self.rope is not None and pos is not None:
-            B_t = self.rope(B_t, pos)
-            C_t = self.rope(C_t, pos)
+            rotations.append(lambda t: self.rope(t, pos))
 
-        # VSSD §3.2: learn m directly. The existing AttentionProjections returns
+        def rotate(t: Tensor) -> Tensor:
+            for f in rotations:
+                t = f(t)
+            return t
+
+        # VSSD §3.2: learn m directly. AttentionProjections returns
         # `A_log = -softplus(...)` (strictly negative). softplus(|A_log|)
         # gives a strictly-positive m of comparable dynamic range.
-        m = F.softplus(-A_raw)                                  # (B, H, T)
+        m = self._mask_m(F.softplus(-A_log), attn_mask)         # (B, H, T)
+        return rotate(B_t), rotate(C_t), V_t, m, rotate
 
+    @staticmethod
+    def _mask_m(m: Tensor, attn_mask: Optional[Tensor]) -> Tensor:
+        """Zero masked tokens' weight so they never enter the global state."""
         if attn_mask is not None and attn_mask.ndim == 2:
-            keep = attn_mask.to(m.dtype)                        # (B, T)
-            m = m * keep.unsqueeze(1)                           # (B, H, T)
+            m = m * attn_mask.to(m.dtype).unsqueeze(1)          # (B, H, T)
+        return m
 
-        y = vssd_forward(B_t, C_t, V_t, m)                      # (B, H, T, head_dim)
-
+    def _finish(self, y: Tensor) -> Tensor:
         Bsz, H, T, hd = y.shape
         y = y.transpose(1, 2).contiguous().view(Bsz, T, H * hd)
-        y = self.post_norm(y)
-        return self.proj(y)
+        return self.proj(self.post_norm(y))
+
+
+def vssd_beta_gamma_forward(
+    B: Tensor, C1: Tensor, C2: Tensor, V: Tensor, m1: Tensor, m2: Tensor
+) -> Tensor:
+    """Apply the VSSD-beta,gamma output formula, doc eq. (vssd-beta-gamma):
+
+        Y = C1 ((B (*) m1)^T X) + C2 ((B (*) m2)^T X)
+
+    Two independently-read global pools. ``B`` and ``V`` are shared; only the
+    query and the per-token weight differ per pool.
+
+    The independence of ``C2`` is the whole content of the operator, not a
+    detail. With a shared query the two terms factor back together,
+
+        C H1 + C H2 = C (H1 + H2) = C ((B (*) (m1 + m2))^T X),
+
+    which is plain VSSD-gamma with a combined weight vector -- the second pool
+    would be unable to express anything the first could not, since a shared C
+    sums the rows away before the output is formed. Giving pool 2 its own query
+    is what stops that factoring. ``tests/unit/test_vssd_beta_gamma.py`` asserts
+    both halves: that sharing C collapses exactly, and that not sharing it does
+    not.
+    """
+    return vssd_forward(B, C1, V, m1) + vssd_forward(B, C2, V, m2)
+
+
+class Mamba3VSSDBetaGammaAttention(Mamba3VSSDAttention):
+    """VSSD-beta,gamma self-attention (doc section 6.7.9, eq. vssd-beta-gamma).
+
+    VSSD-gamma's mask collapses to one per-token scalar, which carries no |i-j|
+    term at all. This variant adds a second, independently-read global pool,
+    motivated by the beta band of Mamba-3's trapezoidal mask: the doc shows the
+    causal L3 mask is exactly as low-rank off the diagonal as Mamba-2's, so beta's
+    causal content costs nothing to recover, but that the *bidirectional* collapse
+    needs two pools because the forward pass wants beta_{j+1} where the reverse
+    wants beta_{j-1}, and a single query cannot keep them apart.
+
+    Cost against VSSD-gamma: one extra C projection and one extra scalar
+    projection, 2x the O(ND) state and 2x the einsum work. Still independent of T
+    in memory, and still strictly cheaper than bidirectional SSD's O(T^2(N+D))
+    once T is large.
+
+    What this is not: a proof that pool 2 recovers Mamba-3's beta-band behaviour.
+    m2 is a freely-learned per-token vector, motivated by -- not constrained to
+    equal -- beta_{j+1}. It buys comparable *capacity* at 2x cost. Whether
+    initialising or regularising it toward beta-like behaviour beats leaving it
+    free is untested.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        H, N = self.num_heads, self.state_dim
+        # Pool 2's own query and scalar weight. B and V stay shared, so this is
+        # one linear of H*N + H outputs, mirroring the C and A rows of
+        # AttentionProjections rather than duplicating the whole bundle.
+        self.proj2 = nn.Linear(self.dim, H * N + H, bias=False)
+        self.bc_norm_c2 = BCNorm(H, N)
+        self.A2_bias = nn.Parameter(torch.zeros(H))
+
+    def forward(
+        self,
+        x: Tensor,
+        pos: Optional[Tensor] = None,
+        attn_mask: Optional[Tensor] = None,
+    ) -> Tensor:
+        B_t, C1, V_t, m1, rotate = self._project(x, pos, attn_mask)
+
+        Bsz, T, _ = x.shape
+        H, N = self.num_heads, self.state_dim
+        p2 = self.proj2(x)
+        C2 = self.bc_norm_c2(p2[..., : H * N].reshape(Bsz, T, H, N).transpose(1, 2))
+        # Rotate pool 2's query exactly as B was rotated, or its scores stop
+        # depending on relative position only.
+        C2 = rotate(C2)
+        # m2 built exactly like m1 (doc: "a second A^(2)_t, built exactly like
+        # eq. projA but with independent weights"), so the two pools differ only
+        # in their weights, never in their parameterisation.
+        A2_log = -F.softplus(p2[..., H * N :].transpose(1, 2) + self.A2_bias[None, :, None])
+        m2 = self._mask_m(F.softplus(-A2_log), attn_mask)
+
+        return self._finish(vssd_beta_gamma_forward(B_t, C1, C2, V_t, m1, m2))
