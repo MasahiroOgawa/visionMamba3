@@ -813,11 +813,12 @@ Typical use      & Long context / large $T_{kv}$ & Short cross-attention / ablat
 \end{tabular}
 \end{center}
 
-Both variants can be augmented with the RoPE trick of
+Both variants can be augmented with the complex-SSM rotary of
 \S\ref{sec:rope}: apply the rotation $\bm{R}_{\le i}^{(q)}$ to each
 query $\bm{C}_i^q$ and $\bm{R}_{\le j}^{(kv)}$ to each key
-$\bm{B}_j^{kv}$ before the inner product. This injects relative
-positional information into cross-attention.
+$\bm{B}_j^{kv}$ before the inner product. This makes the score
+depend on each side's own content-derived rotation, not relative
+position (\S\ref{sec:2drope} gives that instead).
 
 %% ================================================================
 %% ================================================================
@@ -856,8 +857,13 @@ A patch at the top-right thus never reads from the bottom-left — half
 the image is missing. An image has no natural causal direction, so
 this asymmetry is harmful.
 
-\subsection{Mamba-3's complex-SSM rotary: attention with learned RoPE}
+\subsection{Mamba-3's complex-SSM rotary}
 \label{sec:rope}
+
+The source paper calls this ``the RoPE trick,'' but we deliberately avoid that name
+here: as shown below, the angle is content-based, not positional, and calling it RoPE
+(\emph{Rotary Position Embedding}) invites exactly that confusion. \S\ref{sec:2drope}
+covers the genuinely position-based mechanism this document calls RoPE instead.
 
 Mamba-3 promotes $\bm{A}$ from a real scalar to a block-diagonal
 matrix of $2{\times}2$ rotations
@@ -918,16 +924,18 @@ analogue of \eqref{eq:self-entry} becomes
   \widetilde{\bm{B}}_j := \bm{R}_{\le j}\,\bm{B}_j.
 \end{equation}
 That is, \textbf{Mamba-3 self-attention is linear attention with a
-structured mask $\bm{L}$ and a \emph{data-dependent} rotary embedding}
-applied to the $\bm{B}$ (key) and $\bm{C}$ (query) projections,
-exactly the Transformer's RoPE but with angles learned per token
-rather than fixed to $10000^{-2i/N}$.
+structured mask $\bm{L}$ and a \emph{content-dependent} rotary embedding}
+applied to the $\bm{B}$ (key) and $\bm{C}$ (query) projections ---
+structurally the same rotation the Transformer's RoPE uses, but with the
+angle read from each token's content rather than fixed to a position-based
+schedule $10000^{-2i/N}$.
 
 \subsection{2-D RoPE applied outside the operator}\label{sec:2drope}
 \label{sec:rope2d}
 
-To encode row and column positions, use the RoPE trick of
-\S\ref{sec:rope} with a \emph{factored} angle schedule. For the
+To encode row and column positions, reuse the rotation mechanism of
+\S\ref{sec:rope} with a \emph{factored}, position-based angle schedule instead of
+the content-based one. For the
 $n$-th channel of the state, split into independent row and column
 angles
 \begin{equation}\label{eq:rope2d}
@@ -1144,12 +1152,13 @@ factors out of the Hadamard product:
 recovering \eqref{eq:nc-Y}. The Mamba-3 extras compose cleanly on top
 of VSSD-$\gamma$:
 \begin{itemize}
-  \item The RoPE trick of \S\ref{sec:rope} still applies: rotate
+  \item The rotation mechanism of \S\ref{sec:rope} still applies: rotate
         $\bm{B}_j, \bm{C}_i$ by $\bm{R}_{\le j}, \bm{R}_{\le i}$ before
-        \eqref{eq:nc-Y}, and the inner product
-        $\widetilde{\bm{C}}_i^\top \widetilde{\bm{B}}_j$ carries relative
-        positional information. With the 2-D factorization
-        \eqref{eq:rope2d}, this becomes the 2-D RoPE used by VSSD.
+        \eqref{eq:nc-Y}. With the 2-D factorization \eqref{eq:rope2d}, this
+        becomes the 2-D RoPE used by VSSD, and the inner product
+        $\widetilde{\bm{C}}_i^\top \widetilde{\bm{B}}_j$ then carries relative
+        positional information; \S\ref{sec:rope}'s own content-based angle
+        does not.
   \item The MIMO extension of \S\ref{sec:mimo} carries over by
         replicating \eqref{eq:nc-Y} per head: $\bm{Y}^{(i)} =
         \bm{C}^{(i)}\bigl((\bm{B}^{(j)}\odot\bm{m})^\top\bm{X}^{(j)}\bigr)$,
@@ -1203,9 +1212,9 @@ otherwise standard vision block. Following \cite{vssd}~\S 3.3:
         \eqref{eq:rope2d} is applied to $\bm{C}_i$ and $\bm{B}_j$ before
         the inner product in \eqref{eq:nc-Y}, restoring the spatial
         relationship between patches that is otherwise lost in the
-        permutation-invariant global state $\bm{H}$. This is the
-        Mamba-3 RoPE trick of \S\ref{sec:rope} applied to the VSSD-$\gamma$
-        kernel.
+        permutation-invariant global state $\bm{H}$. This reuses
+        \S\ref{sec:rope}'s rotation mechanism, applied here with a
+        position-based rather than content-based angle.
   \item \textbf{FFN, residual, normalization.} A standard
         Transformer-style FFN follows the VSSD-$\gamma$; both the VSSD-$\gamma$ and
         the FFN are wrapped in residual connections, matching the
@@ -2602,8 +2611,8 @@ rather than the 2026-04 snapshot that produced the legacy numbers above.
 Using only \eqref{eq:ssd-derived}, we have obtained:
 
 \begin{itemize}
-  \item \textbf{Self-attention:} \eqref{eq:self-out} and, with
-        learned RoPE, \eqref{eq:self-rope}. Multi-head via
+  \item \textbf{Self-attention:} \eqref{eq:self-out} and, with the
+        content-based rotary, \eqref{eq:self-rope}. Multi-head via
         \eqref{eq:mimo-self}.
   \item \textbf{Cross-attention:} Variant~A \eqref{eq:crossA-out}
         (cheap, compressed KV) and Variant~B \eqref{eq:crossB-out}
@@ -2634,7 +2643,7 @@ Section~\ref{sec:ssd}. The choices made by a specific architecture
 amount to (i) which tokens supply $\bm{B},\bm{C},\bm{X}$ (self vs
 cross vs multi-view), and (ii) which structured mask $\bm{L}$ is used
 (causal vs bidirectional vs block-diagonal vs view-masked). Mamba-3's
-exponential-trapezoidal rule \eqref{eq:L3} and RoPE trick
+exponential-trapezoidal rule \eqref{eq:L3} and complex-SSM rotary
 \eqref{eq:complex-rec} then give the mask and the query/key its final,
 expressive form.
 
