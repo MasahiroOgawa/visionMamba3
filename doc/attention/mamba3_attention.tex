@@ -1352,20 +1352,32 @@ content at zero extra cost.
 The free lunch ends at \S\ref{sec:bidi}'s reverse pass. Reversing the
 sequence and re-applying \eqref{eq:rec3} is not merely relabeling
 $j<t\leftrightarrow j>t$: the trapezoidal term's shift direction
-flips too. Unrolling the reverse recurrence (the same steps as
+flips too. \S\ref{sec:ncssd-mamba3}'s causal result \eqref{eq:m-beta-gamma},
+with the diagonal written out explicitly, is the forward pass
+\begin{equation}\label{eq:m-beta-gamma-fwd}
+  h_i^{\to} \;=\; \sum_{j<i} m_j Z_j + \gamma_i Z_i,
+  \qquad m_j := \gamma_j + \beta_{j+1}.
+\end{equation}
+Unrolling the reverse recurrence (the same steps as
 \S\ref{sec:ssd-unroll}, mirrored) gives, in \emph{original} token
-indices,
+indices, the reverse pass
 \begin{equation}\label{eq:m-beta-gamma-rev}
   h_i^{\leftarrow} \;=\; \gamma_i Z_i + \sum_{j>i} m'_j Z_j,
   \qquad m'_j := \gamma_j + \beta_{j-1},
 \end{equation}
-i.e.\ the reverse pass wants $\beta_{j-1}$ where the forward pass
-wanted $\beta_{j+1}$ \eqref{eq:m-beta-gamma}. Summing forward and
-backward and removing the doubled diagonal (as in \eqref{eq:nc-bi}),
-\begin{equation}
-  h_i^{\text{bi}} - \gamma_i Z_i
-  \;=\; \sum_{j<i} m_j Z_j \;+\; \sum_{j>i} m'_j Z_j \;+\; \gamma_i Z_i,
-\end{equation}
+i.e.\ the reverse pass wants $\beta_{j-1}$ where the forward pass wanted
+$\beta_{j+1}$. Both passes carry their \emph{own} copy of the diagonal
+term $\gamma_i Z_i$ --- token $i$'s own contribution to its own output
+--- so summing them naively counts it twice, exactly the situation
+\eqref{eq:nc-bi} handled by subtracting one copy back out:
+\begin{align}
+  h_i^{\to} + h_i^{\leftarrow}
+    &= \sum_{j<i} m_j Z_j + \sum_{j>i} m'_j Z_j + 2\gamma_i Z_i
+    &&\text{(naive sum: diagonal counted twice)} \notag\\
+  h_i^{\text{bi}} \;:=\; \bigl(h_i^{\to} + h_i^{\leftarrow}\bigr) - \gamma_i Z_i
+    &= \sum_{j<i} m_j Z_j + \sum_{j>i} m'_j Z_j + \gamma_i Z_i
+    &&\text{(one copy removed, one remains)} \label{eq:m-beta-gamma-bi}
+\end{align}
 which genuinely depends on $i$ through \emph{which} weight ($m_j$ or
 $m'_j$) token $j$ receives. Unlike the $\gamma$-only case
 \eqref{eq:nc-bi}, the split does not cancel: this is exactly a
