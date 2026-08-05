@@ -2316,13 +2316,10 @@ column.}
 \centering
 \includegraphics[width=\linewidth]{ablation_mem_acc.png}
 \caption{Accuracy against peak memory, the trade-off the operators exist to
-change. Colour is the operator family (blue 2-directional, orange 4-directional,
-green VSSD-$\gamma$, purple VSSD-$\beta,\gamma$), marker is the positional encoding
-(triangle none, square 2-D RoPE,
-circle both), grey stars are the softmax and CNN baselines. At $T{=}65$ memory is
-almost flat across operators and the plot is effectively an accuracy ranking; at
-$T{=}1025$ the state-space operators separate from softmax attention horizontally,
-which is the property the linear-time recurrence buys.}
+change; colour, marker, and baseline keys are given in the legend. At $T{=}65$
+memory is almost flat across operators and the plot is effectively an accuracy
+ranking; at $T{=}1025$ the state-space operators separate from softmax attention
+horizontally, which is the property the linear-time recurrence buys.}
 \label{fig:ablation-mem-acc}
 \end{figure}
 

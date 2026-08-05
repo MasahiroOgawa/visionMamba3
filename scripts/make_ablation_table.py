@@ -26,6 +26,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.lines import Line2D  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 OUT_DIR = REPO / "doc" / "attention"
@@ -93,8 +94,24 @@ def write_table(rows) -> None:
     print(f"wrote {OUT_DIR / 'ablation_table.tex'}")
 
 
+FAM_COLOURS = {"2-dir": "#4878CF", "4-dir": "#E06C2B", "VSSD": "#3A9E5C", "VSSD-bg": "#8E44AD"}
+FAM_LABELS = {"2-dir": "2-directional", "4-dir": "4-directional",
+              "VSSD": r"VSSD-$\gamma$", "VSSD-bg": r"VSSD-$\beta,\gamma$"}
+ENC_MARKERS = {"none": "^", "RoPE": "s", "rotary": "o"}
+ENC_LABELS = {"none": "none", "RoPE": "+2-D RoPE", "rotary": "+2-D RoPE +rotary"}
+BASE_COLOURS = {"CNN (ResNet)": "black", "Softmax attention": "0.6"}
+
+# Point labels used to be drawn inline next to each marker, but with 11 points per
+# panel the labels overlapped each other and the markers (see git history). Colour
+# and marker already encode family/positional-encoding, so a legend replaces them
+# entirely -- no in-plot text left to overlap. Sized so the legend/tick/axis text
+# reads at >= \small (10pt), matching the smallest font size already used elsewhere
+# in mamba3_attention.tex (the ablation table), once scaled by \linewidth / FIG_W.
+FIG_W = 360 / 72.27  # pt -> in; matches mamba3_attention.tex's \textwidth exactly
+
+
 def write_plot(rows) -> None:
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.6))
+    fig, axes = plt.subplots(1, 2, figsize=(FIG_W, 4.6))
     for ax, idx, title in ((axes[0], 0, r"$T=65$"), (axes[1], 1, r"$T=1025$")):
         for label, a, b in rows:
             d = (a, b)[idx]
@@ -103,22 +120,41 @@ def write_plot(rows) -> None:
             base = "CNN" in label or "Softmax" in label
             fam = ("2-dir" if "2-dir" in label else "4-dir" if "4-dir" in label
                    else "VSSD-bg" if "beta" in label else "VSSD")
-            colour = {"2-dir": "#4878CF", "4-dir": "#E06C2B",
-                      "VSSD": "#3A9E5C", "VSSD-bg": "#8E44AD"}.get(fam, "0.35")
-            # Marker encodes the positional encoding: none / RoPE / RoPE+rotary.
-            mk = "o" if "rotary" in label else ("s" if "RoPE" in label else "^")
-            ax.scatter(d["mem"], d["acc"], s=90, marker="*" if base else mk,
-                       color="0.35" if base else colour,
-                       edgecolors="black", linewidths=0.5, zorder=3)
-            ax.annotate(label, (d["mem"], d["acc"]), textcoords="offset points",
-                        xytext=(6, 3), fontsize=7)
-        ax.set_xlabel("Peak memory (MiB)")
-        ax.set_ylabel("CIFAR-10 accuracy (%)")
-        ax.set_title(title)
+            enc = "rotary" if "rotary" in label else ("RoPE" if "RoPE" in label else "none")
+            colour = BASE_COLOURS[label] if base else FAM_COLOURS[fam]
+            mk = "*" if base else ENC_MARKERS[enc]
+            ax.scatter(d["mem"], d["acc"], s=100 if base else 80, marker=mk,
+                       color=colour, edgecolors="black", linewidths=0.6, zorder=3)
+        ax.set_xlabel("Peak memory (MiB)", fontsize=10)
+        ax.set_ylabel("CIFAR-10 accuracy (%)", fontsize=10)
+        ax.set_title(title, fontsize=11)
+        ax.tick_params(labelsize=10)
         ax.grid(alpha=0.3)
-    fig.tight_layout()
+
+    handles = [
+        Line2D([0], [0], marker="o", linestyle="", markerfacecolor=FAM_COLOURS[k],
+               markeredgecolor="black", markersize=8, label=FAM_LABELS[k])
+        for k in ("2-dir", "4-dir", "VSSD", "VSSD-bg")
+    ] + [
+        Line2D([0], [0], marker=ENC_MARKERS[k], linestyle="", markerfacecolor="0.75",
+               markeredgecolor="black", markersize=8, label=ENC_LABELS[k])
+        for k in ("none", "RoPE", "rotary")
+    ] + [
+        Line2D([0], [0], marker="*", linestyle="", markerfacecolor=BASE_COLOURS[lbl],
+               markeredgecolor="black", markersize=11, label=lbl)
+        for lbl in ("CNN (ResNet)", "Softmax attention")
+    ]
+    # ncol=2 (not 4): a 4-column legend is wider than the two subplots combined,
+    # so bbox_inches="tight" grows the saved canvas to fit it -- silently breaking
+    # the FIG_W == \linewidth point-for-point match every font size above relies
+    # on. 2 columns fits inside the subplots' own width, so nothing overflows and
+    # bbox_inches=None (below) saves at exactly figsize, no surprise rescale.
+    fig.legend(handles=handles, loc="lower center", ncol=2, fontsize=10,
+               frameon=False, bbox_to_anchor=(0.5, 0.0),
+               columnspacing=1.2, handletextpad=0.5)
+    fig.subplots_adjust(left=0.13, right=0.98, top=0.90, bottom=0.42, wspace=0.45)
     out = OUT_DIR / "ablation_mem_acc.png"
-    fig.savefig(out, dpi=300, bbox_inches="tight")
+    fig.savefig(out, dpi=300)
     plt.close(fig)
     print(f"wrote {out}")
 
