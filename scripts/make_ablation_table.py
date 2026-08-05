@@ -2,7 +2,7 @@
 """Emit the Vision Mamba-3 ablation table and memory-vs-accuracy plot for
 doc/attention/mamba3_attention.tex.
 
-The 3x3 grid is {2-dir, 4-dir, NC-SSD} x {no positional encoding, 2-D RoPE,
+The 3x3 grid is {2-dir, 4-dir, VSSD-gamma} x {no positional encoding, 2-D RoPE,
 2-D RoPE + Mamba-3 rotary}, at both sequence lengths, plus the softmax and CNN
 baselines for context.
 
@@ -37,13 +37,13 @@ ROWS = [
     ("Softmax attention", "vit_attn", "table1_patch4", "table1_patch1"),
     ("2-dir SSD", "vit_mamba3", "vm3_ablation_patch4_norope", "vm3_t1025_norope"),
     ("2-dir SSD, +2-D RoPE", "vit_mamba3", "vm3_ropeonly_recheck", "vm3_t1025_rope"),
-    ("2-dir SSD, +RoPE +rotary", "vit_mamba3", "vm3_interleaved_vit_mamba3", "vm3_t1025_rope_rotary"),
+    ("2-dir SSD, +2-D RoPE +rotary", "vit_mamba3", "vm3_interleaved_vit_mamba3", "vm3_t1025_rope_rotary"),
     ("4-dir SSD", "vit_mamba3_4dir", "vm3_ablation_patch4_norope", "vm3_t1025_norope"),
     ("4-dir SSD, +2-D RoPE", "vit_mamba3_4dir", "vm3_ropeonly_recheck", "vm3_t1025_rope"),
-    ("4-dir SSD, +RoPE +rotary", "vit_mamba3_4dir", "vm3_interleaved_vit_mamba3_4dir", "vm3_t1025_rope_rotary"),
-    ("NC-SSD", "vit_mamba3_vssd", "vm3_ablation_patch4_norope", "vm3_t1025_norope"),
-    ("NC-SSD, +2-D RoPE", "vit_mamba3_vssd", "vm3_ropeonly_recheck", "vm3_t1025_rope"),
-    ("NC-SSD, +RoPE +rotary", "vit_mamba3_vssd", "vm3_interleaved_vit_mamba3_vssd", "vm3_t1025_rope_rotary"),
+    ("4-dir SSD, +2-D RoPE +rotary", "vit_mamba3_4dir", "vm3_interleaved_vit_mamba3_4dir", "vm3_t1025_rope_rotary"),
+    (r"VSSD-$\gamma$", "vit_mamba3_vssd", "vm3_ablation_patch4_norope", "vm3_t1025_norope"),
+    (r"VSSD-$\gamma$, +2-D RoPE", "vit_mamba3_vssd", "vm3_ropeonly_recheck", "vm3_t1025_rope"),
+    (r"VSSD-$\gamma$, +2-D RoPE +rotary", "vit_mamba3_vssd", "vm3_interleaved_vit_mamba3_vssd", "vm3_t1025_rope_rotary"),
 ]
 
 
@@ -96,8 +96,8 @@ def write_plot(rows) -> None:
             if d is None:
                 continue
             base = "CNN" in label or "Softmax" in label
-            fam = "2-dir" if "2-dir" in label else "4-dir" if "4-dir" in label else "NC-SSD"
-            colour = {"2-dir": "#4878CF", "4-dir": "#E06C2B", "NC-SSD": "#3A9E5C"}.get(fam, "0.35")
+            fam = "2-dir" if "2-dir" in label else "4-dir" if "4-dir" in label else "VSSD"
+            colour = {"2-dir": "#4878CF", "4-dir": "#E06C2B", "VSSD": "#3A9E5C"}.get(fam, "0.35")
             # Marker encodes the positional encoding: none / RoPE / RoPE+rotary.
             mk = "o" if "rotary" in label else ("s" if "RoPE" in label else "^")
             ax.scatter(d["mem"], d["acc"], s=90, marker="*" if base else mk,
