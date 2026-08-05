@@ -29,7 +29,8 @@ attention, so putting it into a vision pipeline is a relabelling exercise plus a
 mask-builder swap. On top of that we build the image operator: two positional
 encodings (Mamba-3's own complex-SSM rotary, and an external 2-D RoPE applied to
 $\bm{B}$ and $\bm{C}$), two- and four-directional scans, and the non-causal collapse
-(NC-SSD / VSSD) that removes causality without multi-scan. Four applications
+(NC-SSD, called Visual State Space Duality --- VSSD --- in its source paper) that
+removes causality without multi-scan. Four applications
 follow --- segmentation-head design, CIFAR-10 classification, ETH3D camera pose, and
 ETH3D metric depth --- each reported with the provenance of its numbers, including
 the two studies whose honest answer is that the operator change alone did not help.
@@ -1387,7 +1388,7 @@ causal-plus-anticausal recurrent pair (ordinary bidirectional SSD,
 $O(ND)$ global summary. The $\beta$-band's shift structure is what
 breaks the symmetry that lets $\gamma$ alone collapse.
 
-\subsubsection{Vision SSD(\texorpdfstring{$-\beta,\gamma$}{-beta,gamma}): a second, independently-read pool}
+\subsubsection{\texorpdfstring{VSSD-$\beta,\gamma$}{VSSD-beta,gamma}: a second, independently-read pool}
 
 The obstruction above is specifically that \emph{both} pools would
 need to be read out through the \emph{same} $\bm{C}_i$. It is tempting
