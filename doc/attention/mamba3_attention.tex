@@ -244,7 +244,10 @@ with $\odot$ the Hadamard product and $\bm{L}\in\mathbb{R}^{T\times T}$
 a structured lower-triangular mask that we derive explicitly in
 Section~\ref{sec:ssd}. This single equation is the bridge between
 recurrences and attention: the next section is devoted to explaining
-exactly why.
+exactly why. When the specific recurrence matters we write $\bm{L}_2$
+for Mamba-2's two-term mask \eqref{eq:L2} and $\bm{L}_3$ for Mamba-3's
+three-term (trapezoidal) mask \eqref{eq:L3}; unadorned $\bm{L}$ means
+either, whichever is in scope.
 
 \subsection{What this note actually does}
 
@@ -1306,8 +1309,8 @@ causal mask, and yes-with-a-cost for the non-causal one.
 
 \subsubsection{The causal \texorpdfstring{$\bm{L}_3$}{L3} mask is secretly rank-one off the diagonal}
 
-Take \eqref{eq:L3} and factor out the shared cumulative product
-$\bar{\bm{A}}_t := \prod_{k=1}^{t}\alpha_k$ (so
+Take $\bm{L}_3$, Mamba-3's mask \eqref{eq:L3} (\S\ref{sec:decay}), and factor out the shared cumulative
+product $\bar{\bm{A}}_t := \prod_{k=1}^{t}\alpha_k$ (so
 $\prod_{k=j+1}^{t}\alpha_k = \bar A_t/\bar A_j$):
 \begin{equation}\label{eq:L3-rank1}
   L_{tj} \;=\; \bar A_t\Bigl(\underbrace{\tfrac{\gamma_j}{\bar A_j}
