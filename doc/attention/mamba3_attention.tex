@@ -2300,8 +2300,8 @@ token's $(row,col)$ pixel position, applied \emph{before} the SSD kernel runs.
 Mamba-3's own complex-SSM rotary of \S\ref{sec:rope} is a data-\emph{dependent}
 rotation instead: a learned per-token angle that accumulates \emph{inside} the
 recurrence, with no direct notion of pixel position at all. Below, rows marked
-``+2-D RoPE'' have the first on and the second off; ``+RoPE +rotary'' have both
-on. Table~\ref{tab:ablation} is the resulting $3\times3$ grid at
+``+2-D RoPE'' have the first on and the second off; ``+2-D RoPE +rotary'' have
+both on. Table~\ref{tab:ablation} is the resulting $3\times3$ grid at
 both sequence lengths, on CIFAR-10 under one fixed recipe (80 epochs at $T{=}65$,
 30 at $T{=}1025$; single seed, no variance bounds), with the softmax and CNN
 baselines measured alongside for reference. Numbers are generated directly from
