@@ -1390,17 +1390,34 @@ breaks the symmetry that lets $\gamma$ alone collapse.
 \subsubsection{Vision SSD(\texorpdfstring{$-\beta,\gamma$}{-beta,gamma}): a second, independently-read pool}
 
 The obstruction above is specifically that \emph{both} pools would
-need to be read out through the \emph{same} $\bm{C}_i$: forcing
-$h^{(1)}=\sum_j m_j Z_j$ and $h^{(2)}=\sum_j m'_j Z_j$ through one
-shared query collapses back to a single vector $m_j+m'_j$, by
-linearity, and that sum is exactly the query-independent,
-direction-blind mixture that the previous paragraph shows cannot
-represent the true bidirectional $\beta$-weighting. The fix already
-exists in this document: the MIMO extension of \S\ref{sec:mimo},
-which Section~\ref{sec:ncssd-mamba3} already notes ``carries over by
+need to be read out through the \emph{same} $\bm{C}_i$. It is tempting
+to write this with one shared $\bm{C}$ and a $2\times T$ matrix
+$\bm{m}$, as $\bm{Y}=\bm{C}\bigl((\bm{B}\odot\bm{m})^\top\bm{X}\bigr)$
+--- but the only way to make that expression well-defined is to
+compute each row's contribution separately and add them,
+$\bm{Y} = \bm{C}\bm{H}^{(1)} + \bm{C}\bm{H}^{(2)}$ with
+$\bm{H}^{(k)} := (\bm{B}\odot\bm{m}^{(k)})^\top\bm{X}$. Because
+matrix multiplication is linear, a \emph{shared} $\bm{C}$ factors
+straight back out:
+\begin{equation}
+  \bm{C}\bm{H}^{(1)} + \bm{C}\bm{H}^{(2)}
+  \;=\; \bm{C}\bigl(\bm{H}^{(1)}+\bm{H}^{(2)}\bigr)
+  \;=\; \bm{C}\Bigl(\bigl(\bm{B}\odot(\bm{m}^{(1)}+\bm{m}^{(2)})\bigr)^\top\bm{X}\Bigr),
+\end{equation}
+which is just \eqref{eq:nc-Y} again with the single combined vector
+$\bm{m}^{(1)}+\bm{m}^{(2)}$: the second row of $\bm{m}$ never gets a
+chance to say anything the first row couldn't already say, because a
+shared $\bm{C}$ sums the two rows away before the output is formed.
+Concretely, this is the $m_j+m'_j$ collapse from the previous
+paragraph, and that sum is exactly the query-independent,
+direction-blind mixture shown there to be unable to represent the
+true bidirectional $\beta$-weighting. The fix already exists in this
+document: the MIMO extension of \S\ref{sec:mimo}, which
+Section~\ref{sec:ncssd-mamba3} already notes ``carries over by
 replicating \eqref{eq:nc-Y} per head.'' Give the $\beta$-motivated
 pool its \emph{own} query projection $\bm{C}^{(2)}$, independent of
-the $\gamma$-pool's $\bm{C}^{(1)}:=\bm{C}$:
+the $\gamma$-pool's $\bm{C}^{(1)}:=\bm{C}$, so the two terms can no
+longer be merged by factoring out a common $\bm{C}$:
 \begin{equation}\label{eq:vssd-beta-gamma}
   \boxed{\;\bm{Y} \;=\; \bm{C}^{(1)}\bigl((\bm{B}\odot\bm{m}^{(1)})^\top\bm{X}\bigr)
         \;+\; \bm{C}^{(2)}\bigl((\bm{B}\odot\bm{m}^{(2)})^\top\bm{X}\bigr),\;}
