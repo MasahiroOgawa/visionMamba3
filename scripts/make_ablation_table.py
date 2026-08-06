@@ -58,7 +58,7 @@ OP_LABELS = {
     "2-dir SSD": "2-directional",
     "4-dir SSD": "4-directional",
     r"VSSD-$\gamma$": r"VSSD-$\gamma$",
-    r"VSSD-$\beta,\gamma$": r"VSSD-$\beta,\gamma$",
+    r"VSSD-$\beta,\gamma$": r"VSSD-$\beta,\gamma$ (Ours)",
 }
 BASE_COLOURS = {"CNN (ResNet)": "black", "Softmax attention": "0.6"}
 
