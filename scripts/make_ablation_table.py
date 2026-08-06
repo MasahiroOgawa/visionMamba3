@@ -245,8 +245,11 @@ def _legend_handles(grouped_cols: bool = False) -> list[Line2D]:
     return ops + bases[:1] + encs + bases[1:]
 
 
+# Defaults are the doc render. fig_h/bottom shrink with FONT_PT for the same reason the
+# paper call does: at 8pt the legend needs less reserved height than it did at 10pt,
+# and the surplus was showing as a band of white between the axes and the keys.
 def write_plot(rows, out: Path = None, fig_w: float = None,
-               fig_h: float = 4.6, legend_cols: int = 2, bottom: float = 0.46) -> None:
+               fig_h: float = 3.9, legend_cols: int = 2, bottom: float = 0.40) -> None:
     """Draw accuracy against peak memory.
 
     `legend_cols` and `fig_h` travel together. The legend is the tall part of this
