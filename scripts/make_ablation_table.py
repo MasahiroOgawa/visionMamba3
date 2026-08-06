@@ -109,6 +109,12 @@ ROWS = [
 # by \linewidth / FIG_W.
 FIG_W = 360 / 72.27  # pt -> in; matches mamba3_attention.tex's \textwidth exactly
 
+# The figure is drawn 1:1 (its 478pt canvas is placed at 0.92*522 = 480pt), so a font
+# size set here IS the printed size. elsarticle[5p] sets 9pt body, \small tables and
+# \footnotesize captions, so the old 10pt made the plot the largest text on the page.
+# 8pt matches the table body and clears Elsevier's 7pt artwork floor.
+FONT_PT, TITLE_PT = 8, 9
+
 
 def cell(run_dir: str, variant: str) -> dict | None:
     p = REPO / "result" / run_dir / "results.json"
@@ -226,9 +232,9 @@ def _legend_handles(grouped_cols: bool = False) -> list[Line2D]:
     def blank():
         return Line2D([], [], linestyle="none", marker="none", label=" ")
 
-    ops = [mark("o", OP_COLOURS[k], 8, OP_LABELS[k]) for k in OP_COLOURS]
-    encs = [mark(ENC_MARKERS[k], "0.75", 8, ENC_LABELS[k]) for k in (NONE, ROT, ROPE, BOTH)]
-    bases = [mark("*", v, 11, k) for k, v in BASE_COLOURS.items()]
+    ops = [mark("o", OP_COLOURS[k], 6, OP_LABELS[k]) for k in OP_COLOURS]
+    encs = [mark(ENC_MARKERS[k], "0.75", 6, ENC_LABELS[k]) for k in (NONE, ROT, ROPE, BOTH)]
+    bases = [mark("*", v, 8, k) for k, v in BASE_COLOURS.items()]
 
     if grouped_cols:
         rows = max(len(ops), len(encs), len(bases))
@@ -278,14 +284,14 @@ def write_plot(rows, out: Path = None, fig_w: float = None,
             if i != idx:
                 continue
             base = op in BASE_COLOURS
-            ax.scatter(d["mem"], d["acc"], s=100 if base else 80,
+            ax.scatter(d["mem"], d["acc"], s=52 if base else 40,
                        marker="*" if base else ENC_MARKERS[enc],
                        color=BASE_COLOURS[op] if base else OP_COLOURS[op],
                        edgecolors="black", linewidths=0.6, zorder=3)
-        ax.set_xlabel("Peak memory (MiB)", fontsize=10)
-        ax.set_ylabel("CIFAR-10 accuracy (%)", fontsize=10)
-        ax.set_title(title, fontsize=11)
-        ax.tick_params(labelsize=10)
+        ax.set_xlabel("Peak memory (MiB)", fontsize=FONT_PT)
+        ax.set_ylabel("CIFAR-10 accuracy (%)", fontsize=FONT_PT)
+        ax.set_title(title, fontsize=TITLE_PT)
+        ax.tick_params(labelsize=FONT_PT)
         ax.grid(alpha=0.3)
 
     # ncol=2 (not 4): a 4-column legend is wider than the two subplots combined,
@@ -293,7 +299,7 @@ def write_plot(rows, out: Path = None, fig_w: float = None,
     # the FIG_W == \linewidth point-for-point match every font size above relies
     # on. 2 columns fits inside the subplots' own width, so nothing overflows and
     # bbox_inches=None (below) saves at exactly figsize, no surprise rescale.
-    fig.legend(handles=_legend_handles(grouped_cols=legend_cols == 3), loc="lower center", ncol=legend_cols, fontsize=10,
+    fig.legend(handles=_legend_handles(grouped_cols=legend_cols == 3), loc="lower center", ncol=legend_cols, fontsize=FONT_PT,
                frameon=False, bbox_to_anchor=(0.5, 0.0),
                columnspacing=1.2, handletextpad=0.5)
     fig.subplots_adjust(left=0.13, right=0.98, top=0.90, bottom=bottom, wspace=0.45)
@@ -329,8 +335,11 @@ def main() -> int:
     write_plot(rows)
     if args.paper_out:
         write_paper_table(rows, args.paper_out / "tab_cifar_body.tex")
+        # bottom/fig_h were tuned for the old 10pt legend; at 8pt it needs less
+        # reserved height, and giving the space back to the axes both un-squashes
+        # the panels and shortens the float.
         write_plot(rows, args.paper_out / "fig_cifar_mem_acc.pdf", PAPER_FIG_W,
-                   fig_h=3.4, legend_cols=3, bottom=0.50)
+                   fig_h=3.0, legend_cols=3, bottom=0.40)
     if missing:
         print("\nCells still unmeasured (printed as '--'):")
         for m in missing:
