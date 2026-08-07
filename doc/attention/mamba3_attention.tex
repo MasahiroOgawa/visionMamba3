@@ -6,6 +6,11 @@
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{positioning,fit,backgrounds}
+% Same convention as the paper's TikZ figures: blue = trained here, grey = frozen
+% DA3-SMALL pretrained weights. Kept in sync with paper/main.tex's cTrain.
+\definecolor{cTrain}{HTML}{4878CF}
 \usepackage{hyperref}
 \hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black}
 
@@ -2569,6 +2574,70 @@ the distillation phase and the depth fine-tune draw only from the 10 training
 scenes; \texttt{terrains} is touched exclusively by the evaluator. Any future
 change to this harness must preserve that, and a run that cannot demonstrate it
 should not be reported.
+
+
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[
+  font=\footnotesize,
+  bx/.style   = {draw=black!45, fill=black!7,  rounded corners=1pt,
+                 minimum width=30mm, minimum height=5.0mm, align=center},
+  tr/.style   = {draw=cTrain!80!black, fill=cTrain!22, rounded corners=1pt,
+                 minimum width=30mm, minimum height=5.0mm, align=center},
+  % \footnotesize, not \scriptsize: the paper's font floor forbids anything smaller,
+  % and this figure should stay liftable into it. Hierarchy comes from colour and
+  % italics instead of size. White fill so the "x 12 blocks" note masks the arrow it
+  % sits on rather than overprinting it.
+  note/.style = {font=\footnotesize\itshape, text=black!55, align=center,
+                 fill=white, inner sep=1.2pt},
+  hd/.style   = {font=\small\bfseries, align=center},
+  ar/.style   = {-latex, draw=black!55, shorten >=1pt, shorten <=1pt},
+]
+\def\colsep{38mm}
+\foreach \i/\name/\mix/\mixsty/\mask in {
+  0/{DA3-SMALL}/{softmax\\self-attention}/bx/{$T\times T$ softmax},
+  1/{+ bidirectional}/{bidirectional\\SSD}/tr/{$\tilde L_{ij}$ symmetric},
+  2/{+ VSSD-$\gamma$}/{VSSD-$\gamma$}/tr/{mask $\to$ vector $m$},
+  3/{+ VSSD-$\beta,\gamma$}/{VSSD-$\beta,\gamma$}/tr/{$m$ is $2\times T$}}
+{
+  \begin{scope}[xshift=\i*\colsep]
+    \node[hd]                          (h\i) at (0,0.95) {\name};
+    \node[bx]                          (pe\i) at (0,0)      {patch embed $14^2$};
+    \node[bx, below=1.6mm of pe\i]     (ln\i) {LayerNorm};
+    \node[\mixsty, below=1.6mm of ln\i](mx\i) {\mix};
+    \node[note, below=0.6mm of mx\i]   (nt\i) {\mask};
+    \node[bx, below=0.6mm of nt\i]     (mlp\i){MLP};
+    \node[note, below=0.8mm of mlp\i]  (xn\i) {$\times\,12$ blocks};
+    \node[bx, below=0.8mm of xn\i]     (br\i) {DimBridge};
+    \node[\mixsty, below=1.6mm of br\i](dp\i) {DualDPT head};
+    \node[note, below=0.6mm of dp\i]         {metric depth};
+    % Background layer: the "x 12 blocks" note is white-filled to mask the arrow it
+    % sits on, which only works if the arrow is drawn underneath it.
+    \begin{pgfonlayer}{background}
+      \foreach \a/\b in {pe\i/ln\i, ln\i/mx\i, mlp\i/br\i, br\i/dp\i}
+        \draw[ar] (\a) -- (\b);
+    \end{pgfonlayer}
+  \end{scope}
+}
+% DA3-SMALL's head is frozen too: it is the zero-shot reference, nothing is trained.
+\node[bx, minimum width=30mm, minimum height=5.0mm, align=center] at (dp0) {DualDPT head};
+\node[bx, minimum width=30mm, minimum height=5.0mm, align=center] at (br1) {DimBridge};
+\node[bx, minimum width=30mm, minimum height=5.0mm, align=center] at (br2) {DimBridge};
+\node[bx, minimum width=30mm, minimum height=5.0mm, align=center] at (br3) {DimBridge};
+\end{tikzpicture}
+\caption{The four backbones compared on ETH3D metric depth
+(\S\ref{sec:eth3d-depth}). Only the self-attention mixer inside DA3-SMALL is
+swapped; patch embedding, MLPs and DimBridge keep DA3-SMALL's pretrained
+weights in every column. \textcolor{cTrain!80!black}{\textbf{Blue}} marks what
+is trained here --- the mixer in Phase B, the DualDPT head additionally in
+Phase C --- and grey marks weights frozen at their pretrained values.
+DA3-SMALL is the zero-shot reference, so nothing in its column is trained. The
+three swapped columns differ \emph{only} in the mask their mixer applies, noted
+under each: a symmetric $|i-j|$ decay for the bidirectional scan, a single
+per-token vector for VSSD-$\gamma$, and two independently-read pools for
+VSSD-$\beta,\gamma$.}
+\label{fig:depth-variants}
+\end{figure}
 
 \subsection{Two-phase protocol}
 \label{sec:eth3d-depth-protocol}
