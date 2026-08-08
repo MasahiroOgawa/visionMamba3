@@ -63,7 +63,8 @@ def run_variant(variant: str, args, device: torch.device) -> dict:
         args.batch_size, args.data_dir, args.num_workers, device
     )
     model = build_model(variant, patch_size=args.patch_size, rope=args.rope,
-                        fused=args.fused, rope_angles=args.rope_angles).to(device)
+                        fused=args.fused, rope_angles=args.rope_angles,
+                        rope_angle_scale=args.rope_angle_scale).to(device)
     n_params = count_params(model)
     print(f"  params: {n_params / 1e6:.2f} M ({n_params:,})")
 
@@ -194,6 +195,17 @@ def main() -> None:
     ap.add_argument("--rope", action=argparse.BooleanOptionalAction, default=True,
                     help="give the mamba mixers 2-D RoPE on B/C. --no-rope reproduces "
                          "the originally published Table 1 rows, which ran without it.")
+    ap.add_argument("--no-cudnn", action="store_true",
+                    help="Disable cuDNN. Escape hatch for a broken cuDNN install: this "
+                    "venv currently raises CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH on "
+                    "any conv2d, though it ran fine on 2026-08-07 and the venv has not "
+                    "changed since 2026-07-08. Only the patch-embed conv uses cuDNN here "
+                    "-- the SSD/VSSD matmuls do not -- so the cost is negligible.")
+    ap.add_argument("--rope-angle-scale", type=float, default=1.0,
+                    help="Scale the VSSD rotary's per-token angle increment. theta is a "
+                    "plain cumsum there, so its spread grows linearly with T; 65/1025 gives "
+                    "T=1025 the spread T=65 had. Diagnostic for whether spread, not the "
+                    "rotary itself, is what breaks training.")
     ap.add_argument("--rope-angles", action=argparse.BooleanOptionalAction, default=None,
                     help="Mamba-3's own complex-SSM rotary inside the operator, which "
                          "stacks with --rope. Unset means the per-operator default: on "
@@ -223,6 +235,8 @@ def main() -> None:
     args = ap.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
+    if args.no_cudnn:
+        torch.backends.cudnn.enabled = False
     device = torch.device(args.device)
     if device.type == "cpu" and args.epochs > 5:
         print("[smoke] --device cpu -> shortening epochs to 2")

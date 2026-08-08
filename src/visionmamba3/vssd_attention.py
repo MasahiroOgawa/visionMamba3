@@ -80,6 +80,14 @@ class Mamba3VSSDAttention(nn.Module):
         bidirectional: bool = True,
         three_term: bool = True,
         rope_angles: bool = False,
+        # Diagnostic: scale the per-token angle increment. theta is a plain cumsum here,
+        # so its spread across the sequence grows linearly with T; at T=1025 that is
+        # ~160 turns, and the pooled state sum_j m_j R(theta_j) B_j decoheres. Setting
+        # this to 65/1025 gives T=1025 the same total angular spread T=65 had, which is
+        # the test of whether spread -- not the rotary itself -- is what breaks training.
+        # Wrapping theta would be a no-op: cos/sin are 2pi-periodic, so only the spread
+        # matters, not the absolute value.
+        rope_angle_scale: float = 1.0,
         row_renorm: bool = True,
         chunk_size: Optional[int] = None,
         use_fused_kernel: bool = True,
@@ -92,6 +100,7 @@ class Mamba3VSSDAttention(nn.Module):
         self.head_dim = dim // num_heads
         self.state_dim = state_dim
         self.rope = rope
+        self.rope_angle_scale = float(rope_angle_scale)
 
         self.projections = AttentionProjections(
             dim, num_heads, state_dim, rope_angles=rope_angles
@@ -142,7 +151,7 @@ class Mamba3VSSDAttention(nn.Module):
             # a plain cumsum, i.e. position advances one step per token rather
             # than data-dependently. Rotating B and C alike still makes the
             # C_i . B_j score depend on the relative angle, which is the point.
-            theta = torch.cumsum(angles, dim=-2)
+            theta = torch.cumsum(angles, dim=-2) * self.rope_angle_scale
             rotations.append(lambda t: apply_cumulative_rope(t, theta))
         if self.rope is not None and pos is not None:
             rotations.append(lambda t: self.rope(t, pos))
