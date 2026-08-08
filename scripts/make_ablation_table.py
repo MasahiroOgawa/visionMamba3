@@ -62,14 +62,17 @@ OP_LABELS = {
 }
 BASE_COLOURS = {"CNN (ResNet)": "black", "Softmax attention": "0.6"}
 
-# Models with no token axis, omitted from the T=1025 panel of the plot. A ResNet does
-# not tokenise, so its "T=1025" entry is the same network as its "T=65" one -- the
-# patch size it was nominally run at changes nothing about it. Plotting it against a
-# sequence length invites reading its memory as a point on the same scaling curve as
-# the attention operators, when the whole question that panel asks is how cost grows
-# with token count. It stays in the T=65 panel, where it is an accuracy reference,
-# and in the table, where its numbers are labelled rather than positioned.
+# Models with no token axis: omitted from the T=1025 panel of the plot AND from the
+# T=1025 columns of both tables. A ResNet does not tokenise, so its "T=1025" entry is
+# the same network as its "T=65" one -- the patch size it was nominally run at changes
+# nothing about it. Reporting it against a sequence length invites reading its cost as
+# a point on the same scaling curve as the attention operators, when the whole question
+# both the panel and those columns ask is how cost grows with token count. It stays at
+# T=65, where it is an accuracy reference. The cells print TOKEN_FREE_MARK rather than
+# `--`, because `--` means "not measured yet" -- these were measured, they just do not
+# mean what the column header says.
 TOKEN_FREE = {"CNN (ResNet)"}
+TOKEN_FREE_MARK = "n/a"
 
 # (operator, encoding, variant, result dir for T=65, result dir for T=1025)
 # Only post-pairing-fix directories are listed for cells that enable both encodings.
@@ -135,6 +138,14 @@ def fmt(x, spec: str) -> str:
     return "--" if x is None else format(x, spec)
 
 
+def long_cells(op: str, b: dict | None) -> str:
+    """The three T=1025 cells for one row, blanked for operators with no token axis."""
+    if op in TOKEN_FREE:
+        return " & ".join([TOKEN_FREE_MARK] * 3)
+    return (f"{fmt(b and b['acc'], '.2f')} & {fmt(b and b['lat'], '.1f')} "
+            f"& {fmt(b and b['mem'], '.0f')}")
+
+
 def write_table(rows) -> None:
     r"""Emit the tabular, sized to fit \textwidth.
 
@@ -168,7 +179,7 @@ def write_table(rows) -> None:
         lines.append(
             f"{shown} & {enc} & {fmt(params, '.2f')} "
             f"& {fmt(a and a['acc'], '.2f')} & {fmt(a and a['lat'], '.1f')} & {fmt(a and a['mem'], '.0f')} "
-            f"& {fmt(b and b['acc'], '.2f')} & {fmt(b and b['lat'], '.1f')} & {fmt(b and b['mem'], '.0f')} \\\\"
+            f"& {long_cells(op, b)} \\\\"
         )
     lines += [r"\hline", r"\end{tabular}}"]
     (OUT_DIR / "ablation_table.tex").write_text("\n".join(lines) + "\n")
@@ -203,7 +214,7 @@ def write_paper_table(rows, out: Path) -> None:
         lines.append(
             f"{shown} & {enc} & {fmt(params, '.2f')} "
             f"& {fmt(a and a['acc'], '.2f')} & {fmt(a and a['lat'], '.1f')} & {fmt(a and a['mem'], '.0f')} "
-            f"& {fmt(b and b['acc'], '.2f')} & {fmt(b and b['lat'], '.1f')} & {fmt(b and b['mem'], '.0f')} \\\\"
+            f"& {long_cells(op, b)} \\\\"
         )
     lines += [r"\bottomrule", r"\end{tabular}"]
     out.write_text("\n".join(lines) + "\n")

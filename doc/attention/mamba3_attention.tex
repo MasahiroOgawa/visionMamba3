@@ -2332,7 +2332,11 @@ configuration differed by $0.67$ points, so gaps below $\sim$$0.7$ are not
 meaningful, and every cell is a single seed. The VSSD-$\beta,\gamma$ rows are not
 parameter-matched with the rest ($2.93$\,M against $2.71$\,M); see the Par.\ column.
 Enc.: ``---'' neither encoding, ``rotary'' Mamba-3's complex rotary alone,
-``2-D RoPE'' the external encoding alone, ``both'' both. Units: Par.\ in millions of
+``2-D RoPE'' the external encoding alone, ``both'' rotary $+$ 2-D RoPE. ``n/a'' marks
+the CNN's $T{=}1025$ cells: a ResNet does not tokenise, so it has no sequence length,
+and the patch size it was nominally run at changes nothing about the network; it is
+reported at $T{=}65$ only, and is likewise absent from
+Fig.~\ref{fig:ablation-mem-acc}'s $T{=}1025$ panel. Units: Par.\ in millions of
 parameters, Acc.\ in \%, Lat.\ in ms, Mem in MiB. An operator's name is printed on the
 first row of its four-cell block only.}
 \label{tab:ablation}
