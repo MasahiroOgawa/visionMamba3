@@ -2609,7 +2609,7 @@ should not be reported.
     \node[bx, below=0.6mm of nt\i]     (mlp\i){MLP};
     \node[note, below=0.8mm of mlp\i]  (xn\i) {$\times\,12$ blocks};
     \node[bx, below=0.8mm of xn\i]     (br\i) {DimBridge};
-    \node[\mixsty, below=1.6mm of br\i](dp\i) {DualDPT head};
+    \node[bx, below=1.6mm of br\i]     (dp\i) {DualDPT head};
     \node[note, below=0.6mm of dp\i]         {metric depth};
     % Background layer: the "x 12 blocks" note is white-filled to mask the arrow it
     % sits on, which only works if the arrow is drawn underneath it.
@@ -2619,19 +2619,16 @@ should not be reported.
     \end{pgfonlayer}
   \end{scope}
 }
-% DA3-SMALL's head is frozen too: it is the zero-shot reference, nothing is trained.
-\node[bx, minimum width=30mm, minimum height=5.0mm, align=center] at (dp0) {DualDPT head};
-\node[bx, minimum width=30mm, minimum height=5.0mm, align=center] at (br1) {DimBridge};
-\node[bx, minimum width=30mm, minimum height=5.0mm, align=center] at (br2) {DimBridge};
-\node[bx, minimum width=30mm, minimum height=5.0mm, align=center] at (br3) {DimBridge};
 \end{tikzpicture}
 \caption{The four backbones compared on ETH3D metric depth
 (\S\ref{sec:eth3d-depth}). Only the self-attention mixer inside DA3-SMALL is
 swapped; patch embedding, MLPs and DimBridge keep DA3-SMALL's pretrained
 weights in every column. \textcolor{cTrain!80!black}{\textbf{Blue}} marks what
-is trained here --- the mixer in Phase B, the DualDPT head additionally in
-Phase C --- and grey marks weights frozen at their pretrained values.
-DA3-SMALL is the zero-shot reference, so nothing in its column is trained. The
+\emph{Phase B} trains: the mixer alone, with everything grey frozen at DA3-SMALL's
+pretrained values for those $11\,000$ steps. Phase C then unfreezes the entire
+network (\S\ref{sec:eth3d-depth-protocol}), so this colouring describes the
+distillation phase, not the final state. DA3-SMALL is the zero-shot reference,
+so nothing in its column is trained at all. The
 three swapped columns differ \emph{only} in the mask their mixer applies, noted
 under each: a symmetric $|i-j|$ decay for the bidirectional scan, a single
 per-token vector for VSSD-$\gamma$, and two independently-read pools for
@@ -2669,6 +2666,43 @@ tempting claim that the head is frozen at DA3-SMALL's own calibration and that
 matching DA3-SMALL is therefore the best achievable outcome by construction.
 That ceiling argument describes an \emph{earlier} recipe, in which the head was
 frozen; it does not describe this one.
+
+\paragraph{Recipe at a glance.} The two phases differ in \emph{what is allowed
+to move}, and that difference is the single thing most often misread, so it is
+tabulated rather than left in prose. Counts are for VSSD-$\beta,\gamma$; the
+one-pool operators have a $11.61$\,M mixer and $36.45$\,M total.
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+ & \textbf{Phase B} (distillation) & \textbf{Phase C} (depth fine-tune) \\
+\midrule
+Steps        & $11\,000$ (CM12/CM24 used $20\,000$) & $1\,000$ \\
+Trainable    & the swapped mixer, and nothing else  & \emph{the whole network} \\
+             & $15.03$\,M of $39.86$\,M             & $39.86$\,M of $39.86$\,M \\
+Frozen       & patch embed, MLPs, DimBridge,        & nothing \\
+             & DualDPT, \texttt{cam\_enc}           & \\
+Breakdown    & attn $15.03$                          & attn $15.03$, dpt $0.44$, \\
+             &                                       & \texttt{cam\_dec} $1.19$, other $23.21$ \\
+Supervision  & a frozen teacher's features           & ETH3D ground-truth depth \\
+Teacher      & DA3-SMALL (dim-matched, L2$+$cos) or  & none \\
+             & DA3-LARGE (token-Gram, dim-free)      & \\
+Data         & \multicolumn{2}{l}{$39$ train scenes: ETH3D $10$, HiRoom $25$, 7-Scenes $4$
+                 --- \texttt{terrains} excluded from both} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Two consequences follow, and both contradict readings that are easy to
+reach from the phase names alone. Phase C leaves \emph{nothing} frozen --- the
+$23.21$\,M ``other'' is the patch embedding, the MLPs and DimBridge, so the
+network is free to co-adapt to whatever features Phase B produced, not merely to
+re-fit a head on top of them. And the two budgets are asymmetric by $11\times$:
+whatever Phase B settles into under the constraint that only the mixer may move,
+Phase C has a tenth of the steps to move away from. A recipe whose Phase-B target
+is a poor one is therefore not rescued by Phase C being unconstrained, which is a
+budget property and not a structural limit --- a longer Phase C has never been
+tried.
 
 \subsection{Evaluation}
 \label{sec:eth3d-depth-eval}
