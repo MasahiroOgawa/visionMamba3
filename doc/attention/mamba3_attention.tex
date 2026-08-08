@@ -2550,6 +2550,48 @@ no-encoding reference at every epoch. That is the $T{=}65$ behaviour reappearing
 the spread is controlled, and it is the prediction that distinguishes this account
 from ``the rotary is simply wrong for VSSD''.
 
+\paragraph{The remedy, and what in it is ours.}
+If the spread is the whole problem, the fix is to stop letting it depend on $T$. Setting
+\begin{equation}
+  \theta_j = j\,\frac{2\pi n}{T}
+  \label{eq:rope-turns}
+\end{equation}
+makes the sequence span exactly $n$ turns whatever $T$ is, which removes the coupling
+outright rather than balancing it: neighbour resolution and total spread are no longer one
+parameter. It costs the angle its data-dependence, the increment becoming purely
+positional. Sweeping $n$ on VSSD-$\gamma$ at $T{=}1025$ (six epochs, test accuracy) is
+monotone in favour of less spread:
+\begin{center}\small
+\begin{tabular}{|l|c|c|c|c|}
+\hline
+total spread & $\sim$$1$ turn & $\sim$$10$ turns & $\sim$$163$ turns (learned) & no encoding \\ \hline
+test acc. & $\mathbf{51.9\%}$ & $42.7\%$ & $14.6\%$ & $\sim$$36\%$ \\ \hline
+\end{tabular}
+\end{center}
+
+\noindent\textbf{Equation~\eqref{eq:rope-turns} is not new and we do not claim it.} Dividing
+a rotary's angle by the sequence length is Positional Interpolation~\cite{posinterp}, whose
+$f'(x,i)=f(x,\,iL/L')$ is the same operation, and YaRN~\cite{yarn} and the NTK-aware
+variants refine it further. Even the trade-off is known there: interpolating too far
+``prevent[s] models from distinguishing nearby positions'', which is exactly why shrinking
+the spread must eventually degenerate toward no encoding at all.
+
+What we believe is not documented is the \emph{reason it is needed here}, and the
+difference matters. Positional Interpolation addresses \emph{length extrapolation}: a model
+trained at $L$ and evaluated at $L'>L$ sees position indices it never met, and rescaling
+brings them back into the trained range. Our failure is not extrapolation. The $T{=}1025$
+model is \emph{trained} at $T{=}1025$ and never sees a shorter sequence; nothing is being
+extrapolated, and no rescaling is restoring a familiar range. What is being repaired is the
+coherence of a \emph{pooled} state --- a quantity that has no counterpart in pairwise
+attention, where every rotation meets a query and cancels. So the same arithmetic is
+serving a different purpose, and the condition it enforces is different too: not ``keep
+positions inside the trained range'' but ``keep the total spread $O(1)$ turns, at every
+length, including the one you trained on''.
+
+We state this as a mechanism we have not seen reported rather than as a novelty claim; a
+literature search is weak evidence of absence, and the arithmetic itself is certainly
+prior art.
+
 \paragraph{Why 2-D RoPE is safe for every operator at both lengths.}
 Its angle is $\theta_{r,c}[n]=\theta^{\mathrm{row}}[n]\,r+\theta^{\mathrm{col}}[n]\,c$,
 a function of the patch's position on the image grid, so it is bounded by the image
