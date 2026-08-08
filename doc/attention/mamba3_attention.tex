@@ -2446,6 +2446,128 @@ whole grid, which is exactly the kind of result that survives review unexamined.
 %% ================================================================
 %% ================================================================
 %% ================================================================
+\subsection{Why the rotary destroys VSSD at long sequence length}
+\label{sec:rotary-vssd}
+%% ================================================================
+The $T{=}1025$ half of the grid contains one result that no amount of tuning
+explains away. With the rotary alone, both VSSD operators sit at $19.14\%$ and
+$19.35\%$ against a $10\%$ chance floor, while the \emph{same} rotary makes
+four-directional the best row in the table at $82.18\%$. Yet at $T{=}65$ that
+encoding is worth $+3.39$ and $+4.87$ to those same VSSD operators --- more than it
+gives any scan operator. The reversal is not a training accident: it follows from
+what the collapse does to the keys.
+
+\paragraph{What the angle actually is.}
+\texttt{AttentionProjections} emits $N/2$ extra values per token, from the same
+linear map that produces $\bm{B},\bm{C},\bm{V}$, so the per-token angle increment
+$\varepsilon_j$ is \emph{learned} and data-dependent. Those rows are
+zero-initialised, so the rotary is the identity at step $0$. The angle carried by
+token $j$ is the running sum $\theta_j=\sum_{k\le j}\varepsilon_k$, and
+\texttt{rotate\_pairs} turns adjacent channel pairs of $\bm{B}_j$ and $\bm{C}_j$ by
+$(\cos\theta_j,\sin\theta_j)$. This is unlike a classical RoPE, whose angle is a
+\emph{fixed} function of position on a geometric frequency schedule; here it is
+learned and cumulative, and that is what makes its spread depend on $T$.
+
+\paragraph{Why it works in the scans.}
+Rotating $\bm{B}$ and $\bm{C}$ by their own angles makes a score depend only on the
+difference,
+\begin{equation}
+  \bigl(\mathcal{R}(\theta_i)\bm{C}_i\bigr)^{\!\top}\bigl(\mathcal{R}(\theta_j)\bm{B}_j\bigr)
+  = \bm{C}_i^{\top}\,\mathcal{R}(\theta_i-\theta_j)\,\bm{B}_j ,
+  \label{eq:rotary-relative}
+\end{equation}
+because a rotation is orthogonal. The absolute angle cancels; only the relative one
+survives, which is the whole point of a rotary embedding. Note what
+\eqref{eq:rotary-relative} requires: the inner product must be formed \emph{before}
+any summation over $j$. The SSD form \eqref{eq:ssd} does exactly that, one score per
+pair, and nothing about it degrades as $T$ grows --- which is why four-directional
+with the rotary is the best $T{=}1025$ row rather than a casualty.
+
+\paragraph{Why VSSD is different, and why the rotary still helps it most.}
+The collapse forms no pairwise score at all. Equation~\eqref{eq:vssd} sums the keys
+into a single state before any query is involved,
+\begin{equation}
+  \bm{H}=\sum_j m_j\,\bigl(\mathcal{R}(\theta_j)\bm{B}_j\bigr)\otimes\bm{V}_j ,
+  \qquad
+  \bm{Y}_i=\bigl(\mathcal{R}(\theta_i)\bm{C}_i\bigr)^{\!\top}\bm{H},
+  \label{eq:vssd-rotary}
+\end{equation}
+which is precisely what buys $O(T)$ instead of $O(T^2)$. No $\theta_i-\theta_j$ ever
+appears, so \eqref{eq:rotary-relative} is unavailable by construction. The rotary is
+nevertheless the most valuable encoding VSSD has, by a different route: $\bm{C}_i$ is
+rotated too, so query $i$ reads the one pooled state along a direction set by its own
+position. Without it the read-out cannot depend on $i$ at all, because $m_j$ carries
+no query index --- the asymmetry of \S\ref{sec:ncssd-mamba3} --- and that is why
+$+3.39$ and $+4.87$ exceed anything the scans gain.
+
+\paragraph{What breaks at $T{=}1025$.}
+The failure is in $\bm{H}$, not in the read-out. Each token contributes
+$m_j\mathcal{R}(\theta_j)\bm{B}_j$ and those are \emph{summed}. Within each of the
+$N/2$ rotation planes the contributions are vectors turned by $\theta_j$; if the
+$\theta_j$ span many full turns they point in effectively unrelated directions, and
+the sum grows like $\sqrt{T}$ rather than $T$ --- a shortfall of about $32\times$ at
+$T{=}1025$. Training aligns the $\bm{B}_j$ so their sum carries signal; a wide spread
+scrambles that alignment, and the state every query reads becomes noise. Because
+$\theta$ is a plain running sum, the spread is $T\varepsilon$: roughly ten full turns
+at $T{=}65$, roughly $160$ at $T{=}1025$.
+
+\paragraph{Why training does not simply learn a smaller angle.}
+This is the natural objection --- the increments are learned, so the optimiser should
+pick a value that works. Two things prevent it, and the second is why it cannot
+recover.
+
+The running sum welds together two quantities that must be set independently. The
+resolution between \emph{neighbouring} tokens is $\varepsilon$ itself, while the
+spread across the \emph{whole} sequence is $T\varepsilon$. They share one parameter
+and their ratio is fixed at $T$, so an $\varepsilon$ large enough to distinguish
+adjacent tokens forces a spread $T$ times larger. At $T{=}65$ both can hold at once;
+at $T{=}1025$ no value satisfies both.
+
+The gradient reaching those rows is amplified by the same running sum. Since
+$\partial\theta_j/\partial\varepsilon_k=1$ for every $j\ge k$, each increment collects
+the gradient of every later position --- up to $1025$ terms against $65$. The angles
+begin at zero, which is the identity and hence the \emph{good} configuration, and this
+amplified gradient carries them out of it inside the first epoch. Once $\bm{H}$ has
+decohered the loss is flat at chance, so no gradient points back. The logs show
+exactly this: training loss $2.21$ at epoch~1 against $\ln 10=2.303$, still $2.26$ at
+epoch~6, while the same operator with no encoding falls $1.97\to1.57$ over five.
+
+\paragraph{Confirmation.}
+If the spread is the cause, bounding it must restore training with nothing else
+changed. Scaling the per-token increment by $65/1025$ gives $T{=}1025$ exactly the
+spread $T{=}65$ had (\texttt{--rope-angle-scale}, VSSD-$\gamma$, six epochs):
+\begin{center}\small
+\begin{tabular}{|l|cc|cc|}
+\hline
+$T{=}1025$, VSSD-$\gamma$ & ep.\ 1 & ep.\ 3 & ep.\ 6 & test \\ \hline
+rotary, unscaled ($\sim$$160$ turns) & $2.26$ / $15.2\%$ & $2.19$ / $16.5\%$ & $2.26$ / $13.6\%$ & $14.6\%$ \\ \hline
+rotary, scaled ($\sim$$10$ turns) & $1.90$ / $30.3\%$ & $1.66$ / $39.6\%$ & $1.65$ / $39.6\%$ & $42.7\%$ \\ \hline
+no encoding (reference) & $1.97$ / $27.1\%$ & $1.75$ / $35.7\%$ & --- & --- \\ \hline
+\end{tabular}
+\end{center}
+It does, and by more than merely not failing: the bounded rotary beats the
+no-encoding reference at every epoch. That is the $T{=}65$ behaviour reappearing once
+the spread is controlled, and it is the prediction that distinguishes this account
+from ``the rotary is simply wrong for VSSD''.
+
+\paragraph{Why 2-D RoPE is safe for every operator at both lengths.}
+Its angle is $\theta_{r,c}[n]=\theta^{\mathrm{row}}[n]\,r+\theta^{\mathrm{col}}[n]\,c$,
+a function of the patch's position on the image grid, so it is bounded by the image
+rather than growing with the sequence. Bounded angles survive pooling; accumulated
+ones do not. That one distinction accounts for 2-D RoPE being the only encoding that
+helps every operator at both sequence lengths, and it is why we deploy it alone at
+long $T$.
+
+\paragraph{Two dead ends, recorded so they are not retried.}
+Wrapping $\theta$ into $[-\pi,\pi)$ changes nothing, since $\cos$ and $\sin$ are
+$2\pi$-periodic: the rotation already depends only on $\theta$ modulo $2\pi$, and the
+\emph{spread} is what matters. And the missing $\Delta$ is not the cause on its own.
+The SSD path accumulates $\mathrm{cumsum}(\text{angles}\cdot\Delta)$ while the
+collapse accumulates $\mathrm{cumsum}(\text{angles})$, $\Delta$ having not survived
+the reduction (\S\ref{sec:ncssd-mamba3}); but the measured $\Delta$ is about $0.74$,
+giving $758$ radians against $1025$ at $T{=}1025$ --- a factor of $1.35$, which cannot
+separate the best row in the table from total collapse.
+
 \section{Application 3: Mamba-3 for Pose Estimation}
 \label{sec:eth3d}
 %% ================================================================
