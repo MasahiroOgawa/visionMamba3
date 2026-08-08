@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+import math
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
@@ -88,6 +90,13 @@ class Mamba3VSSDAttention(nn.Module):
         # Wrapping theta would be a no-op: cos/sin are 2pi-periodic, so only the spread
         # matters, not the absolute value.
         rope_angle_scale: float = 1.0,
+        # Fixed total angular spread, in whole turns, instead of a learned cumulative
+        # angle: theta_j = j * 2*pi*n/T, so the sequence spans exactly `n` turns whatever
+        # T is. This removes the coupling that makes the learned form fail at long T --
+        # there, neighbour resolution is the increment and total spread is T times it, one
+        # parameter for two quantities whose ratio is fixed at T. Pinning the spread costs
+        # the data-dependence of the angle; the increment becomes purely positional.
+        rope_turns: float | None = None,
         row_renorm: bool = True,
         chunk_size: Optional[int] = None,
         use_fused_kernel: bool = True,
@@ -101,6 +110,7 @@ class Mamba3VSSDAttention(nn.Module):
         self.state_dim = state_dim
         self.rope = rope
         self.rope_angle_scale = float(rope_angle_scale)
+        self.rope_turns = None if rope_turns is None else float(rope_turns)
 
         self.projections = AttentionProjections(
             dim, num_heads, state_dim, rope_angles=rope_angles
@@ -151,7 +161,16 @@ class Mamba3VSSDAttention(nn.Module):
             # a plain cumsum, i.e. position advances one step per token rather
             # than data-dependently. Rotating B and C alike still makes the
             # C_i . B_j score depend on the relative angle, which is the point.
-            theta = torch.cumsum(angles, dim=-2) * self.rope_angle_scale
+            if self.rope_turns is not None:
+                # Positional, not learned: one step per token, sized so the whole
+                # sequence covers `rope_turns` turns. `angles` is still projected (the
+                # width is baked into the checkpoint) but only its shape is used.
+                T = angles.shape[-2]
+                step = 2.0 * math.pi * self.rope_turns / max(T, 1)
+                ramp = torch.arange(T, device=angles.device, dtype=angles.dtype) * step
+                theta = ramp[None, None, :, None].expand_as(angles)
+            else:
+                theta = torch.cumsum(angles, dim=-2) * self.rope_angle_scale
             rotations.append(lambda t: apply_cumulative_rope(t, theta))
         if self.rope is not None and pos is not None:
             rotations.append(lambda t: self.rope(t, pos))

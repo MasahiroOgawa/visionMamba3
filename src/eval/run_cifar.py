@@ -64,7 +64,8 @@ def run_variant(variant: str, args, device: torch.device) -> dict:
     )
     model = build_model(variant, patch_size=args.patch_size, rope=args.rope,
                         fused=args.fused, rope_angles=args.rope_angles,
-                        rope_angle_scale=args.rope_angle_scale).to(device)
+                        rope_angle_scale=args.rope_angle_scale,
+                        rope_turns=args.rope_turns).to(device)
     n_params = count_params(model)
     print(f"  params: {n_params / 1e6:.2f} M ({n_params:,})")
 
@@ -201,6 +202,11 @@ def main() -> None:
                     "any conv2d, though it ran fine on 2026-08-07 and the venv has not "
                     "changed since 2026-07-08. Only the patch-embed conv uses cuDNN here "
                     "-- the SSD/VSSD matmuls do not -- so the cost is negligible.")
+    ap.add_argument("--rope-turns", type=float, default=None,
+                    help="Fix the rotary's total angular spread to this many turns over "
+                    "the sequence: theta_j = j*2*pi*n/T, independent of T. Replaces the "
+                    "learned cumulative angle, whose spread grows with T and decoheres "
+                    "the pooled VSSD state. n=1 measured best at T=1025.")
     ap.add_argument("--rope-angle-scale", type=float, default=1.0,
                     help="Scale the VSSD rotary's per-token angle increment. theta is a "
                     "plain cumsum there, so its spread grows linearly with T; 65/1025 gives "

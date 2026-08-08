@@ -243,6 +243,7 @@ def build_model(
     variant: str, patch_size: int = 4, num_classes: int = 10, rope: bool = True,
     fused: bool = True, rope_angles: bool | None = None,
     rope_angle_scale: float = 1.0,
+    rope_turns: float | None = None,
 ) -> nn.Module:
     """Build a CIFAR-10 classifier for one operator variant.
 
@@ -313,7 +314,7 @@ def build_model(
             lambda dim, h: cls(
                 dim, num_heads=h, state_dim=64, out_proj=True, proj_bias=True,
                 rope=rope_mod, rope_angles=rope_angles,
-                rope_angle_scale=rope_angle_scale,
+                rope_angle_scale=rope_angle_scale, rope_turns=rope_turns,
             ),
         )
         ang = "+rotary" if rope_angles else "no rotary"
