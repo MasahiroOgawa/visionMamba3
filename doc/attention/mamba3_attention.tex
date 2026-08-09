@@ -2909,6 +2909,43 @@ VSSD-$\beta,\gamma$.}
 \label{fig:depth-variants}
 \end{figure}
 
+\subsection{Phase A -- architectural preparation (no training)}
+\label{sec:eth3d-depth-phasea}
+
+The phases are lettered from A, and A is not a training stage, which is why the
+protocol below has only two. Phase A is what makes the swapped operator a
+\emph{drop-in} for softmax attention: without it the student starts far from the
+pretrained model and the distillation of Phase B has to recover ground it should
+never have lost. Four things, none of which costs a gradient step:
+
+\begin{itemize}
+\item \textbf{Pretrained weights are inherited by construction.} The student is a
+      full pretrained DA3-SMALL, and \texttt{install\_mamba3} replaces
+      \emph{only} \texttt{block.attn}, in place. Patch embedding, LayerNorms,
+      MLPs, DimBridge and the DualDPT head keep DA3's own weights because they
+      are never touched. (An earlier architecture copied them across explicitly
+      with \texttt{load\_da3\_backbone}; the in-place swap makes that
+      unnecessary.)
+\item \textbf{Post-SSD LayerNorm} (\texttt{post\_norm=True}). The SSD output does
+      not carry softmax's normalisation, so its scale differs from what the
+      pretrained MLP downstream expects. A LayerNorm after the operator restores
+      it.
+\item \textbf{Zero-initialised per-head reverse gate.} The bidirectional sum is
+      $y = y + \tanh(g)\,y_{\text{rev}}$ with $g$ initialised to zero, so at step
+      $0$ the layer is \emph{forward-only} and the reverse path is learned in
+      rather than imposed. Worth remembering when probing a freshly swapped
+      model: it will look causal because the gate is shut, not because the
+      operator is.
+\item \textbf{Row renormalisation} (\texttt{row\_renorm=True}). Each row of
+      $\bm{L}\odot(\bm{C}\bm{B}^{\top})$ is divided by the sum of its absolute
+      weights, restoring the convex-combination contract that softmax provides
+      for free and that the pretrained blocks were trained against.
+\end{itemize}
+
+\noindent All four are active in the runs reported here: the swap constructs the
+operator with its class defaults, which are \texttt{post\_norm=True} and
+\texttt{row\_renorm=True}, and the reverse gate is always zero-initialised.
+
 \subsection{Two-phase protocol}
 \label{sec:eth3d-depth-protocol}
 
