@@ -50,14 +50,8 @@ NONE, ROT, ROPE, BOTH = "---", "rotary", "2-D RoPE", "both"
 # is nothing to repair.
 ROT1, BOTH1 = "rotary (1 turn)", "both (1 turn)"
 
-# Table only, not plotted. The plot is the 4x4 factorial of operator against encoding, and
-# these two are a repair experiment on one cell of it rather than another level of the same
-# factor -- they exist only at T=1025, only for the VSSD operators. Drawing them would add
-# two marker shapes to a legend built around that factorial, and leaving them unlabelled
-# would be worse still.
-PLOT_EXCLUDED_ENC = {ROT1, BOTH1}
 
-ENC_MARKERS = {NONE: "^", ROT: "D", ROPE: "s", BOTH: "o", ROT1: "v", BOTH1: "P"}
+ENC_MARKERS = {NONE: "^", ROT: "s", ROPE: "v", BOTH: "o", ROT1: "D", BOTH1: "P"}
 ENC_LABELS = {NONE: "neither encoding", ROT: "rotary only",
               ROPE: "2-D RoPE only", BOTH: "both",
               ROT1: "1-turn rotary", BOTH1: "1-turn rotary + RoPE"}
@@ -265,13 +259,21 @@ def _legend_handles(grouped_cols: bool = False) -> list[Line2D]:
         return Line2D([], [], linestyle="none", marker="none", label=" ")
 
     ops = [mark("o", OP_COLOURS[k], 6, OP_LABELS[k]) for k in OP_COLOURS]
-    encs = [mark(ENC_MARKERS[k], "0.75", 6, ENC_LABELS[k]) for k in (NONE, ROT, ROPE, BOTH)]
+    encs = [mark(ENC_MARKERS[k], "0.75", 6, ENC_LABELS[k])
+            for k in (NONE, ROT, ROT1, ROPE, BOTH, BOTH1)]
     bases = [mark("*", v, 8, k) for k, v in BASE_COLOURS.items()]
 
     if grouped_cols:
-        rows = max(len(ops), len(encs), len(bases))
+        # Encodings split across two columns rather than one. Six of them in a single
+        # column makes the legend six rows deep, and the legend is the tall part of this
+        # figure: at six rows the float exceeds one text-height, LaTeX gives it a page of
+        # its own and the page number collides with the caption. Two columns of three
+        # keeps it at four rows, the same height as before the repair cells were added.
+        half = (len(encs) + 1) // 2
+        cols = [ops, encs[:half], encs[half:], bases]
+        rows = max(len(c) for c in cols)
         pad = lambda xs: xs + [blank()] * (rows - len(xs))  # noqa: E731
-        return pad(ops) + pad(encs) + pad(bases)
+        return [h for c in cols for h in pad(c)]
     # Baselines split one per column to keep the two columns equal length; sliced
     # rather than indexed so a third baseline would join a column, not vanish.
     return ops + bases[:1] + encs + bases[1:]
@@ -301,8 +303,7 @@ def write_plot(rows, out: Path = None, fig_w: float = None,
                for idx in (0, 1)
                for op, enc, a, b in rows
                for d in ((a, b)[idx],)
-               if d is not None and not (idx == 1 and op in TOKEN_FREE)
-               and enc not in PLOT_EXCLUDED_ENC]
+               if d is not None and not (idx == 1 and op in TOKEN_FREE)]
 
     # One accuracy scale across both panels: the panels exist to be compared, and
     # per-panel autoscaling silently rescales that comparison -- a point sitting
@@ -335,7 +336,7 @@ def write_plot(rows, out: Path = None, fig_w: float = None,
     # the FIG_W == \linewidth point-for-point match every font size above relies
     # on. 2 columns fits inside the subplots' own width, so nothing overflows and
     # bbox_inches=None (below) saves at exactly figsize, no surprise rescale.
-    fig.legend(handles=_legend_handles(grouped_cols=legend_cols == 3), loc="lower center", ncol=legend_cols, fontsize=FONT_PT,
+    fig.legend(handles=_legend_handles(grouped_cols=legend_cols >= 3), loc="lower center", ncol=legend_cols, fontsize=FONT_PT,
                frameon=False, bbox_to_anchor=(0.5, 0.0),
                columnspacing=1.2, handletextpad=0.5)
     fig.subplots_adjust(left=0.13, right=0.98, top=0.90, bottom=bottom, wspace=0.45)
@@ -375,7 +376,7 @@ def main() -> int:
         # reserved height, and giving the space back to the axes both un-squashes
         # the panels and shortens the float.
         write_plot(rows, args.paper_out / "fig_cifar_mem_acc.pdf", PAPER_FIG_W,
-                   fig_h=2.7, legend_cols=3, bottom=0.50)
+                   fig_h=2.7, legend_cols=4, bottom=0.50)
     if missing:
         print("\nCells still unmeasured (printed as '--'):")
         for m in missing:
