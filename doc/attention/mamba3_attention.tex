@@ -2797,27 +2797,56 @@ different loss, different metrics.
 \label{sec:eth3d-depth-split}
 
 The split is by \textbf{scene}, fixed, and not random. Of the 11 extracted
-ETH3D scenes that carry ground-truth depth:
+ETH3D scenes that carry ground-truth depth, each has exactly one role:
 
-\begin{center}
-\begin{tabular}{ll}
+\begin{center}\small
+\begin{tabular}{llrl}
 \toprule
-\textbf{Train} (10 scenes, 374 images) &
-  \texttt{courtyard}, \texttt{delivery\_area}, \texttt{electro},
-  \texttt{facade}, \texttt{kicker}, \\
- & \texttt{office}, \texttt{pipes}, \texttt{playground},
-  \texttt{relief}, \texttt{relief\_2} \\
+\textbf{Role} & \textbf{Scenes} & \textbf{Images} & \textbf{Used for} \\
 \midrule
-\textbf{Held out} (eval only) & \texttt{terrains} (42 views) \\
+Train      & \texttt{courtyard} (38), \texttt{delivery\_area} (44), & 298 & gradient updates \\
+(8 scenes) & \texttt{facade} (76), \texttt{kicker} (31),            &     & in both phases \\
+           & \texttt{office} (26), \texttt{pipes} (14),             &     & \\
+           & \texttt{playground} (38), \texttt{relief} (31)         &     & \\
+\midrule
+Validation & \texttt{relief\_2} (31), \texttt{electro} (45)          & 76  & the plateau LR \\
+(2 scenes) &                                                        &     & schedule only \\
+\midrule
+Test       & \texttt{terrains}                                      & 42  & the reported \\
+(1 scene)  &                                                        & (12 scored) & \texttt{abs\_rel} only \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\noindent\textbf{\texttt{terrains} is never trained on, in either phase.} Both
-the distillation phase and the depth fine-tune draw only from the 10 training
-scenes; \texttt{terrains} is touched exclusively by the evaluator. Any future
-change to this harness must preserve that, and a run that cannot demonstrate it
-should not be reported.
+\noindent The 8 training scenes plus the 2 validation scenes are the 10 scenes
+($298+76=374$ images) that earlier runs trained on as a single pool; the
+validation role is a partition of that pool, not new data. Runs predating the
+plateau schedule (\S\ref{sec:eth3d-depth-legacy}) trained on all 10.
+
+\noindent\textbf{\texttt{terrains} is never trained on, and never tuned against.}
+Three separate mechanisms, listed because each fails differently:
+
+\begin{itemize}
+\item \texttt{HELD\_OUT = "terrains"} in \texttt{data/eth3d\_multi.py}, with
+      \texttt{\_assert\_no\_heldout()} raising at both call sites that build a
+      scene list. This stops it entering training.
+\item The argument parser rejects \texttt{--val-scenes eth3d:terrains}. Without
+      this, the scene would stay out of training but the learning rate would be
+      tuned against it, which is leakage of a subtler kind.
+\item \texttt{--val-scenes} removes its scenes from the training pool as well as
+      measuring on them. The older \texttt{--test-scenes} only measured, so its
+      loss line was computed on scenes the model was training on at the time.
+\end{itemize}
+
+\noindent Verified rather than assumed: \texttt{grep -c terrains} over the
+training logs of every phase --- distillation, its extension, and the depth
+fine-tune --- returns 0 in each. Any future change to this harness must preserve
+that, and a run that cannot demonstrate it should not be reported.
+
+\noindent One caveat that is about scale rather than leakage: the evaluator
+scores \textbf{12 images from a single scene}. Differences in \texttt{abs\_rel}
+of order $0.01$ between checkpoints are weak evidence on a test set that small,
+and are reported as such.
 
 
 \begin{figure}[!tb]
