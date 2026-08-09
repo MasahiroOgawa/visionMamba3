@@ -97,26 +97,38 @@ ROWS = [
     ("4-dir SSD", ROPE, "vit_mamba3_4dir", "vm3_ropeonly_recheck", "vm3_t1025_rope"),
     ("4-dir SSD", BOTH, "vit_mamba3_4dir", "vm3_interleaved_vit_mamba3_4dir", "vm3_t1025_rope_rotary"),
 
+    # The fixed one-turn rows sit inside their operator's group, next to the accumulating
+    # rotary they repair, rather than in a block of their own -- the comparison a reader
+    # makes is rotary vs. rotary (1 turn), and that only reads as a comparison if the two
+    # are adjacent. Their T=65 slot is deliberately empty: the repair only applies where the
+    # accumulated spread is large, and running it at T=65 would report a fix for a failure
+    # that does not occur there.
     (r"VSSD-$\gamma$", NONE, "vit_mamba3_vssd", "vm3_ablation_patch4_norope", "vm3_t1025_norope"),
     (r"VSSD-$\gamma$", ROT, "vit_mamba3_vssd", "vm3_ablation_patch4_norope_rotary", "vm3_t1025_rotary"),
+    (r"VSSD-$\gamma$", ROT1, "vit_mamba3_vssd", "", "vm3_t1025_turns1_vssd"),
     (r"VSSD-$\gamma$", ROPE, "vit_mamba3_vssd", "vm3_ropeonly_recheck", "vm3_t1025_rope"),
     (r"VSSD-$\gamma$", BOTH, "vit_mamba3_vssd", "vm3_interleaved_vit_mamba3_vssd", "vm3_t1025_rope_rotary"),
+    (r"VSSD-$\gamma$", BOTH1, "vit_mamba3_vssd", "", "vm3_t1025_turns1_rope_vssd"),
 
     # VSSD-beta,gamma: its own dirs, because it was added after the first sweep and
     # is not parameter-matched with the rows above (2.93 M vs 2.71 M).
     (r"VSSD-$\beta,\gamma$", NONE, "vit_mamba3_vssd_bg", "vm3_vssdbg_norope", "vm3_t1025_vssdbg_norope"),
     (r"VSSD-$\beta,\gamma$", ROT, "vit_mamba3_vssd_bg", "vm3_vssdbg_norope_rotary", "vm3_t1025_vssdbg_rotary"),
+    (r"VSSD-$\beta,\gamma$", ROT1, "vit_mamba3_vssd_bg", "", "vm3_t1025_turns1_vssdbg"),
     (r"VSSD-$\beta,\gamma$", ROPE, "vit_mamba3_vssd_bg", "vm3_vssdbg_rope", "vm3_t1025_vssdbg_rope"),
     (r"VSSD-$\beta,\gamma$", BOTH, "vit_mamba3_vssd_bg", "vm3_vssdbg_rope_rotary", "vm3_t1025_vssdbg_rope_rotary"),
-
-    # Fixed one-turn spread. T=65 is deliberately empty: the repair only applies where the
-    # learned spread is large, and running it at T=65 would report a fix for a failure that
-    # does not occur there.
-    (r"VSSD-$\gamma$", ROT1, "vit_mamba3_vssd", "", "vm3_t1025_turns1_vssd"),
-    (r"VSSD-$\gamma$", BOTH1, "vit_mamba3_vssd", "", "vm3_t1025_turns1_rope_vssd"),
-    (r"VSSD-$\beta,\gamma$", ROT1, "vit_mamba3_vssd_bg", "", "vm3_t1025_turns1_vssdbg"),
     (r"VSSD-$\beta,\gamma$", BOTH1, "vit_mamba3_vssd_bg", "", "vm3_t1025_turns1_rope_vssdbg"),
 ]
+
+# A fixed-turn rotary is the same architecture as the accumulating one -- only theta's
+# schedule differs, and a schedule has no weights (measured: both read 3146962 params at
+# T=1025). So a 1-turn row's parameter count is its rotary sibling's, and this map says
+# where to borrow it from. Without it the column mixes two different quantities: it is
+# sourced from the T=65 run when there is one and the T=1025 run otherwise, and those
+# differ by the learned position-embedding table, 960 extra tokens x 192 = 0.18 M. That
+# lands as "rotary 2.74, rotary (1 turn) 2.92" on adjacent rows -- reading as though
+# pinning the spread costs parameters, which it does not.
+PARAMS_PROXY = {ROT1: ROT, BOTH1: BOTH}
 
 # Point labels used to be drawn inline next to each marker, but with a dozen-plus
 # points per panel the labels overlapped each other and the markers (see git
@@ -153,6 +165,20 @@ def fmt(x, spec: str) -> str:
     return "--" if x is None else format(x, spec)
 
 
+def params_lookup(rows) -> dict:
+    r"""(op, enc) -> T=65 parameter count, for both tables.
+
+    Always the T=65 run, so the column means one thing on every row, with a 1-turn row
+    borrowing its rotary sibling's count (see PARAMS_PROXY). The tempting shorthand,
+    ``(a or b)["params"]``, is what produced the mixed column this replaces.
+    """
+    return {(op, enc): a["params"] for op, enc, a, _ in rows if a}
+
+
+def params_of(table: dict, op: str, enc: str) -> float | None:
+    return table.get((op, enc)) or table.get((op, PARAMS_PROXY.get(enc)))
+
+
 def long_cells(op: str, b: dict | None) -> str:
     """The three T=1025 cells for one row, blanked for operators with no token axis."""
     if op in TOKEN_FREE:
@@ -184,13 +210,14 @@ def write_table(rows) -> None:
         r" & & & \multicolumn{3}{c|}{$T{=}65$} & \multicolumn{3}{c|}{$T{=}1025$} \\",
         r"Operator & Enc. & Par. & Acc. & Lat. & Mem & Acc. & Lat. & Mem \\ \hline",
     ]
+    p65 = params_lookup(rows)
     prev_op = None
     for i, (op, enc, a, b) in enumerate(rows):
         if prev_op is not None and op != prev_op:
             lines.append(r"\hline")
         shown = op if op != prev_op else ""
         prev_op = op
-        params = (a or b or {}).get("params")
+        params = params_of(p65, op, enc)
         lines.append(
             f"{shown} & {enc} & {fmt(params, '.2f')} "
             f"& {fmt(a and a['acc'], '.2f')} & {fmt(a and a['lat'], '.1f')} & {fmt(a and a['mem'], '.0f')} "
@@ -219,13 +246,14 @@ def write_paper_table(rows, out: Path) -> None:
         r" & Acc.\,(\%) & Lat.\,(ms) & Mem (MiB) \\",
         r"\midrule",
     ]
+    p65 = params_lookup(rows)
     prev_op = None
     for op, enc, a, b in rows:
         if prev_op is not None and op != prev_op:
             lines.append(r"\midrule")
         shown = op if op != prev_op else ""
         prev_op = op
-        params = (a or b or {}).get("params")
+        params = params_of(p65, op, enc)
         lines.append(
             f"{shown} & {enc} & {fmt(params, '.2f')} "
             f"& {fmt(a and a['acc'], '.2f')} & {fmt(a and a['lat'], '.1f')} & {fmt(a and a['mem'], '.0f')} "
