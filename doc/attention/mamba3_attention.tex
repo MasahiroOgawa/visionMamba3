@@ -940,6 +940,64 @@ structurally the same rotation the Transformer's RoPE uses, but with the
 angle read from each token's content rather than fixed to a position-based
 schedule $10000^{-2i/N}$.
 
+\subsection{Pinning the rotary's angular spread}
+\label{sec:rope-turns}
+
+The rotary of \S\ref{sec:rope} carries a property that costs nothing in a scan and is
+fatal under the non-causal collapse of \S\ref{sec:ncssd}. It is a property of
+\eqref{eq:dtheta} itself, so it belongs here beside the derivation; the measurements that
+establish it are in \S\ref{sec:rotary-vssd}.
+
+\paragraph{The problem.}
+By \eqref{eq:dtheta} the angle a token carries is the running sum
+$\Theta_{\le t}[i]=\sum_{s\le t}\Delta_s\theta_s[i]$. Two quantities are therefore one
+parameter: the resolution between \emph{neighbouring} tokens is the per-step increment
+$\varepsilon$, while the spread across the \emph{whole} sequence is $T\varepsilon$, and
+their ratio is pinned at $T$. A scan does not care. By \eqref{eq:self-rope} it forms
+$\widetilde{\bm{C}}_i^{\top}\widetilde{\bm{B}}_j$ one pair at a time, so the absolute
+angles cancel and only $\theta_i-\theta_j$ survives however far $\Theta$ has run. The
+collapse has no such protection: \S\ref{sec:ncssd} sums the keys into a single state
+\emph{before} any query is involved, so no difference is ever formed and the absolute
+angles stay. Once $T\varepsilon$ spans many turns the summed
+$\mathcal{R}(\theta_j)\bm{B}_j$ point in unrelated directions and the pooled state every
+query reads is noise. Measured, the learned spread reaches roughly $160$ turns at
+$T{=}1025$, and both VSSD operators sit at chance.
+
+\paragraph{The remedy.}
+Since the coupling is what does the damage, remove it rather than tune around it: replace
+the running sum of \eqref{eq:dtheta} by a fixed number of turns $n$ spread over the
+sequence,
+\begin{equation}
+  \theta_j = j\,\frac{2\pi n}{T} .
+  \label{eq:rope-turns}
+\end{equation}
+The span is then exactly $n$ turns at every $T$. Neighbour resolution $2\pi n/T$ and total
+spread $2\pi n$ are set independently, so no length forces the trade-off that
+\eqref{eq:dtheta} cannot escape. The price is the angle's data-dependence:
+$\bm{\theta}_t=\bm{W}_\theta\bm{x}_t$ is content-based, whereas \eqref{eq:rope-turns} is
+purely positional.
+
+\paragraph{Where the arithmetic comes from.}
+Equation~\eqref{eq:rope-turns} is not ours. Rescaling a rotary's angle by the ratio of two
+lengths is Positional Interpolation~\cite{posinterp}, whose $f'(x,i)=f(x,\,iL/L')$ is the
+same operation, and YaRN~\cite{yarn} and the NTK-aware variants refine it. What differs is
+the failure it answers. There it restores \emph{length extrapolation} --- a model trained
+at $L$ meets position indices at $L'>L$ that it never saw, and rescaling returns them to
+the trained range. Here nothing is extrapolated: the model is trained at $T{=}1025$ and
+never sees another length. What is repaired is the coherence of a \emph{pooled} state, a
+quantity with no counterpart in pairwise attention, where every rotation meets a query and
+cancels. \S\ref{sec:rotary-vssd} makes that argument in full and states plainly what we do
+and do not claim.
+
+\paragraph{That it works.}
+At $T{=}1025$ and $30$ epochs, $n{=}1$ lifts VSSD-$\gamma$ from $19.14\%$ to $58.98\%$ and
+VSSD-$\beta,\gamma$ from $19.35\%$ to $59.69\%$ (Table~\ref{tab:ablation}): a total
+collapse turned back into ordinary training by bounding one quantity. It does not make the
+rotary preferable --- both stay below their own no-encoding rows and well below 2-D RoPE
+alone --- so \S\ref{sec:2drope}'s encoding is still what we deploy at long $T$.
+\S\ref{sec:rotary-vssd} gives the full grid and the sweep over $n$ that locates the
+boundary.
+
 \subsection{2-D RoPE applied outside the operator}\label{sec:2drope}
 \label{sec:rope2d}
 
@@ -2572,16 +2630,11 @@ The practical conclusion is unchanged and now measured rather than inferred: at 
 sequence length, 2-D RoPE alone.
 
 \paragraph{The remedy, and what in it is ours.}
-If the spread is the whole problem, the fix is to stop letting it depend on $T$. Setting
-\begin{equation}
-  \theta_j = j\,\frac{2\pi n}{T}
-  \label{eq:rope-turns}
-\end{equation}
-makes the sequence span exactly $n$ turns whatever $T$ is, which removes the coupling
-outright rather than balancing it: neighbour resolution and total spread are no longer one
-parameter. It costs the angle its data-dependence, the increment becoming purely
-positional. Sweeping $n$ on VSSD-$\gamma$ at $T{=}1025$ (six epochs, test accuracy) is
-monotone in favour of less spread:
+If the spread is the whole problem, the fix is to stop letting it depend on $T$: the fixed
+$n$-turn angle $\theta_j=2\pi n j/T$ of \eqref{eq:rope-turns}, derived in
+\S\ref{sec:rope-turns}, which removes the coupling outright rather than balancing it.
+Sweeping $n$ on VSSD-$\gamma$ at $T{=}1025$ (six epochs, test accuracy) is monotone in
+favour of less spread:
 \begin{center}\small
 \begin{tabular}{|l|c|c|c|c|}
 \hline
