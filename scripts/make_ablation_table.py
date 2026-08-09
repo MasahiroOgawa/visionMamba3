@@ -43,18 +43,26 @@ OUT_DIR = REPO / "doc" / "attention"
 
 # Encoding keys. These are the literal strings printed in the table's Enc. column
 # and the keys for the plot's markers, so the two cannot disagree.
-NONE, ROT, ROPE, BOTH = "---", "rotary", "2-D RoPE", "both"
+#
+# The combined cells name both encodings rather than saying "both". With four encodings in
+# the column, "both" does not say both of *which* -- the reader has to look up which two of
+# the four it means, and once the 1-turn rows existed there were two different "both"s.
+NONE, ROT, ROPE = "---", "rotary", "2-D RoPE"
+BOTH = r"rotary $+$ 2-D RoPE"
 # The rotary with its angular spread pinned to one turn over the sequence, rather than a
 # learned cumulative angle whose spread grows with T. Measured only at T=1025, which is
 # where the learned form collapses; at T=65 its spread is already small enough that there
 # is nothing to repair.
-ROT1, BOTH1 = "rotary (1 turn)", "both (1 turn)"
+ROT1 = "1-turn rotary"
+BOTH1 = r"1-turn rotary $+$ 2-D RoPE"
 
 
 ENC_MARKERS = {NONE: "^", ROT: "s", ROPE: "v", BOTH: "o", ROT1: "D", BOTH1: "P"}
+# Plain "+" here, not the table's "$+$": these are matplotlib legend strings, where LaTeX
+# math delimiters would render literally.
 ENC_LABELS = {NONE: "neither encoding", ROT: "rotary only",
-              ROPE: "2-D RoPE only", BOTH: "both",
-              ROT1: "1-turn rotary", BOTH1: "1-turn rotary + RoPE"}
+              ROPE: "2-D RoPE only", BOTH: "rotary + 2-D RoPE",
+              ROT1: "1-turn rotary", BOTH1: "1-turn rotary + 2-D RoPE"}
 OP_COLOURS = {
     "2-dir SSD": "#4878CF",
     "4-dir SSD": "#E06C2B",
@@ -238,6 +246,12 @@ def write_paper_table(rows, out: Path) -> None:
     within a week if the paper's were maintained by hand.
     """
     lines = [
+        # Naming both encodings instead of "both" widened the Enc. column past \textwidth
+        # by 1.5pt. Nine columns pay \tabcolsep twice each, so trimming it from LaTeX's
+        # 6pt default to 5pt gives back 18pt -- ample, and less visible than shrinking the
+        # font or re-abbreviating the names the column exists to spell out. Scoped, so it
+        # does not leak into the other tables in this paper.
+        r"{\setlength{\tabcolsep}{5pt}",
         r"\begin{tabular}{llccccccc}",
         r"\toprule",
         r"& & & \multicolumn{3}{c}{$T{=}65$} & \multicolumn{3}{c}{$T{=}1025$} \\",
@@ -259,7 +273,7 @@ def write_paper_table(rows, out: Path) -> None:
             f"& {fmt(a and a['acc'], '.2f')} & {fmt(a and a['lat'], '.1f')} & {fmt(a and a['mem'], '.0f')} "
             f"& {long_cells(op, b)} \\\\"
         )
-    lines += [r"\bottomrule", r"\end{tabular}"]
+    lines += [r"\bottomrule", r"\end{tabular}}"]
     out.write_text("\n".join(lines) + "\n")
     print(f"wrote {out}")
 

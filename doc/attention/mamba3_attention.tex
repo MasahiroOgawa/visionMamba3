@@ -2346,8 +2346,9 @@ Mamba-3's own complex-SSM rotary of \S\ref{sec:rope} is a data-\emph{dependent}
 rotation instead: a learned per-token angle that accumulates \emph{inside} the
 recurrence, with no direct notion of pixel position at all. Below, rows marked
 the Enc.\ column reads ``2-D RoPE'' for the first alone, ``rotary'' for the second
-alone, ``both'' for both, and ``---'' for neither --- a $2\times2$ factorial per
-operator, so each encoding's own effect can be separated from the two interacting.
+alone, both named together when both are on, and ``---'' for neither --- a
+$2\times2$ factorial per operator, so each encoding's own effect can be separated
+from the two interacting.
 Table~\ref{tab:ablation} is the resulting $4\times4$ grid at
 both sequence lengths, on CIFAR-10 under one fixed recipe (80 epochs at $T{=}65$,
 30 at $T{=}1025$; single seed, no variance bounds), with the softmax and CNN
@@ -2390,13 +2391,14 @@ configuration differed by $0.67$ points, so gaps below $\sim$$0.7$ are not
 meaningful, and every cell is a single seed. The VSSD-$\beta,\gamma$ rows are not
 parameter-matched with the rest ($2.93$\,M against $2.71$\,M); see the Par.\ column.
 Enc.: ``---'' neither encoding, ``rotary'' Mamba-3's complex rotary alone,
-``2-D RoPE'' the external encoding alone, ``both'' rotary $+$ 2-D RoPE. ``n/a'' marks
+``2-D RoPE'' the external encoding alone, and the two named together when both are on.
+``1-turn'' marks the pinned-spread rotary of \eqref{eq:rope-turns}. ``n/a'' marks
 the CNN's $T{=}1025$ cells: a ResNet does not tokenise, so it has no sequence length,
 and the patch size it was nominally run at changes nothing about the network; it is
 reported at $T{=}65$ only, and is likewise absent from
 Fig.~\ref{fig:ablation-mem-acc}'s $T{=}1025$ panel. Units: Par.\ in millions of
 parameters, Acc.\ in \%, Lat.\ in ms, Mem in MiB. An operator's name is printed on the
-first row of its four-cell block only.}
+first row of its block only.}
 \label{tab:ablation}
 \small
 \input{ablation_table}
@@ -2608,11 +2610,11 @@ collapse into ordinary training, with nothing else changed.
 
 What it does \emph{not} do is make the rotary worth using at this length, and the
 full runs say so plainly. At $30$ epochs with the spread pinned to one turn
-(Table~\ref{tab:ablation}, the \texttt{(1 turn)} rows):
+(Table~\ref{tab:ablation}, the \texttt{1-turn} rows):
 \begin{center}\small
 \begin{tabular}{|l|cc|cc|}
 \hline
-$T{=}1025$ & no encoding & 1-turn rotary & 2-D RoPE & 1-turn rotary $+$ RoPE \\ \hline
+$T{=}1025$ & no encoding & 1-turn rotary & 2-D RoPE & 1-turn rotary $+$ 2-D RoPE \\ \hline
 VSSD-$\gamma$ & $63.88$ & $58.98$ & $\mathbf{70.10}$ & $64.83$ \\ \hline
 VSSD-$\beta,\gamma$ & $66.90$ & $59.69$ & $\mathbf{71.44}$ & $65.44$ \\ \hline
 \end{tabular}
