@@ -44,10 +44,23 @@ OUT_DIR = REPO / "doc" / "attention"
 # Encoding keys. These are the literal strings printed in the table's Enc. column
 # and the keys for the plot's markers, so the two cannot disagree.
 NONE, ROT, ROPE, BOTH = "---", "rotary", "2-D RoPE", "both"
+# The rotary with its angular spread pinned to one turn over the sequence, rather than a
+# learned cumulative angle whose spread grows with T. Measured only at T=1025, which is
+# where the learned form collapses; at T=65 its spread is already small enough that there
+# is nothing to repair.
+ROT1, BOTH1 = "rotary (1 turn)", "both (1 turn)"
 
-ENC_MARKERS = {NONE: "^", ROT: "D", ROPE: "s", BOTH: "o"}
+# Table only, not plotted. The plot is the 4x4 factorial of operator against encoding, and
+# these two are a repair experiment on one cell of it rather than another level of the same
+# factor -- they exist only at T=1025, only for the VSSD operators. Drawing them would add
+# two marker shapes to a legend built around that factorial, and leaving them unlabelled
+# would be worse still.
+PLOT_EXCLUDED_ENC = {ROT1, BOTH1}
+
+ENC_MARKERS = {NONE: "^", ROT: "D", ROPE: "s", BOTH: "o", ROT1: "v", BOTH1: "P"}
 ENC_LABELS = {NONE: "neither encoding", ROT: "rotary only",
-              ROPE: "2-D RoPE only", BOTH: "both"}
+              ROPE: "2-D RoPE only", BOTH: "both",
+              ROT1: "1-turn rotary", BOTH1: "1-turn rotary + RoPE"}
 OP_COLOURS = {
     "2-dir SSD": "#4878CF",
     "4-dir SSD": "#E06C2B",
@@ -101,6 +114,14 @@ ROWS = [
     (r"VSSD-$\beta,\gamma$", ROT, "vit_mamba3_vssd_bg", "vm3_vssdbg_norope_rotary", "vm3_t1025_vssdbg_rotary"),
     (r"VSSD-$\beta,\gamma$", ROPE, "vit_mamba3_vssd_bg", "vm3_vssdbg_rope", "vm3_t1025_vssdbg_rope"),
     (r"VSSD-$\beta,\gamma$", BOTH, "vit_mamba3_vssd_bg", "vm3_vssdbg_rope_rotary", "vm3_t1025_vssdbg_rope_rotary"),
+
+    # Fixed one-turn spread. T=65 is deliberately empty: the repair only applies where the
+    # learned spread is large, and running it at T=65 would report a fix for a failure that
+    # does not occur there.
+    (r"VSSD-$\gamma$", ROT1, "vit_mamba3_vssd", "", "vm3_t1025_turns1_vssd"),
+    (r"VSSD-$\gamma$", BOTH1, "vit_mamba3_vssd", "", "vm3_t1025_turns1_rope_vssd"),
+    (r"VSSD-$\beta,\gamma$", ROT1, "vit_mamba3_vssd_bg", "", "vm3_t1025_turns1_vssdbg"),
+    (r"VSSD-$\beta,\gamma$", BOTH1, "vit_mamba3_vssd_bg", "", "vm3_t1025_turns1_rope_vssdbg"),
 ]
 
 # Point labels used to be drawn inline next to each marker, but with a dozen-plus
@@ -280,7 +301,8 @@ def write_plot(rows, out: Path = None, fig_w: float = None,
                for idx in (0, 1)
                for op, enc, a, b in rows
                for d in ((a, b)[idx],)
-               if d is not None and not (idx == 1 and op in TOKEN_FREE)]
+               if d is not None and not (idx == 1 and op in TOKEN_FREE)
+               and enc not in PLOT_EXCLUDED_ENC]
 
     # One accuracy scale across both panels: the panels exist to be compared, and
     # per-panel autoscaling silently rescales that comparison -- a point sitting
@@ -353,7 +375,7 @@ def main() -> int:
         # reserved height, and giving the space back to the axes both un-squashes
         # the panels and shortens the float.
         write_plot(rows, args.paper_out / "fig_cifar_mem_acc.pdf", PAPER_FIG_W,
-                   fig_h=3.0, legend_cols=3, bottom=0.40)
+                   fig_h=2.7, legend_cols=3, bottom=0.50)
     if missing:
         print("\nCells still unmeasured (printed as '--'):")
         for m in missing:

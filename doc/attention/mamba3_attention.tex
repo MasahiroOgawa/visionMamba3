@@ -2545,10 +2545,31 @@ rotary, scaled ($\sim$$10$ turns) & $1.90$ / $30.3\%$ & $1.66$ / $39.6\%$ & $1.6
 no encoding (reference) & $1.97$ / $27.1\%$ & $1.75$ / $35.7\%$ & --- & --- \\ \hline
 \end{tabular}
 \end{center}
-It does, and by more than merely not failing: the bounded rotary beats the
-no-encoding reference at every epoch. That is the $T{=}65$ behaviour reappearing once
-the spread is controlled, and it is the prediction that distinguishes this account
-from ``the rotary is simply wrong for VSSD''.
+It does. The mechanism is therefore confirmed: bounding the spread turns a total
+collapse into ordinary training, with nothing else changed.
+
+What it does \emph{not} do is make the rotary worth using at this length, and the
+full runs say so plainly. At $30$ epochs with the spread pinned to one turn
+(Table~\ref{tab:ablation}, the \texttt{(1 turn)} rows):
+\begin{center}\small
+\begin{tabular}{|l|cc|cc|}
+\hline
+$T{=}1025$ & no encoding & 1-turn rotary & 2-D RoPE & 1-turn rotary $+$ RoPE \\ \hline
+VSSD-$\gamma$ & $63.88$ & $58.98$ & $\mathbf{70.10}$ & $64.83$ \\ \hline
+VSSD-$\beta,\gamma$ & $66.90$ & $59.69$ & $\mathbf{71.44}$ & $65.44$ \\ \hline
+\end{tabular}
+\end{center}
+The repair is worth $+40$ points against the collapsed cells ($19.14$ and $19.35$),
+and $+46$ where both encodings are on ($18.94$ and $18.47$). But the bounded rotary
+alone still trails \emph{no encoding at all}, and adding it to 2-D RoPE still costs
+five to six points against 2-D RoPE alone. It stops destroying the model without
+becoming useful.
+
+The six-epoch probe above suggested otherwise --- there the bounded rotary led the
+no-encoding reference --- and that advantage does not survive to convergence. We
+report the longer runs, since they are the ones the rest of the grid is measured at.
+The practical conclusion is unchanged and now measured rather than inferred: at long
+sequence length, 2-D RoPE alone.
 
 \paragraph{The remedy, and what in it is ours.}
 If the spread is the whole problem, the fix is to stop letting it depend on $T$. Setting
