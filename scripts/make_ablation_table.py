@@ -187,11 +187,15 @@ def params_of(table: dict, op: str, enc: str) -> float | None:
     return table.get((op, enc)) or table.get((op, PARAMS_PROXY.get(enc)))
 
 
+# Accuracy prints to ONE decimal. Repeat runs of one configuration differed by 0.67
+# points, so the second decimal is below the noise floor and reporting it claims a
+# precision the measurement does not have. Latency and memory keep their formats: those
+# are deterministic measurements, not seeds.
 def long_cells(op: str, b: dict | None) -> str:
     """The three T=1025 cells for one row, blanked for operators with no token axis."""
     if op in TOKEN_FREE:
         return " & ".join([TOKEN_FREE_MARK] * 3)
-    return (f"{fmt(b and b['acc'], '.2f')} & {fmt(b and b['lat'], '.1f')} "
+    return (f"{fmt(b and b['acc'], '.1f')} & {fmt(b and b['lat'], '.1f')} "
             f"& {fmt(b and b['mem'], '.0f')}")
 
 
@@ -228,7 +232,7 @@ def write_table(rows) -> None:
         params = params_of(p65, op, enc)
         lines.append(
             f"{shown} & {enc} & {fmt(params, '.2f')} "
-            f"& {fmt(a and a['acc'], '.2f')} & {fmt(a and a['lat'], '.1f')} & {fmt(a and a['mem'], '.0f')} "
+            f"& {fmt(a and a['acc'], '.1f')} & {fmt(a and a['lat'], '.1f')} & {fmt(a and a['mem'], '.0f')} "
             f"& {long_cells(op, b)} \\\\"
         )
     lines += [r"\hline", r"\end{tabular}}"]
@@ -270,7 +274,7 @@ def write_paper_table(rows, out: Path) -> None:
         params = params_of(p65, op, enc)
         lines.append(
             f"{shown} & {enc} & {fmt(params, '.2f')} "
-            f"& {fmt(a and a['acc'], '.2f')} & {fmt(a and a['lat'], '.1f')} & {fmt(a and a['mem'], '.0f')} "
+            f"& {fmt(a and a['acc'], '.1f')} & {fmt(a and a['lat'], '.1f')} & {fmt(a and a['mem'], '.0f')} "
             f"& {long_cells(op, b)} \\\\"
         )
     lines += [r"\bottomrule", r"\end{tabular}}"]

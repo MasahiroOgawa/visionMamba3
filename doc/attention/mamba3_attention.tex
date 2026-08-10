@@ -2298,7 +2298,7 @@ The four-variant sweep below was measured on the 2026-04 operator: no 2-D RoPE, 
 reference (non-fused) path, and an unpinned \texttt{mamba-ssm} working copy.
 \S\ref{sec:ablation} was measured after 2-D RoPE was added, the fused kernel was
 enabled, and the dependency was pinned as a submodule (\S\ref{sec:impl-pin}). The two
-therefore do not compose, and the $83.66$ in \S\ref{sec:cifar-sweep} in particular did
+therefore do not compose, and the $83.7$ in \S\ref{sec:cifar-sweep} in particular did
 \emph{not} reproduce once the dependency was pinned --- that unreproducibility is what
 motivated pinning it. Read \S\ref{sec:cifar-sweep} for the comparison it was built to
 make (SSD against VSSD under identical recipes, which is internally consistent because
@@ -2438,8 +2438,8 @@ compounding two single-seed measurements implies, and all three point the same w
 
 The overlap argument is therefore not supported --- but neither is its opposite,
 because the comparison has a confound worth naming. VSSD-$\beta,\gamma$ starts lower
-($75.12$ against $75.76$) and the two finish within $0.58$ of each other ($81.76$
-against $81.18$), so both rows look like they are approaching the same ceiling near
+($75.1$ against $75.8$) and the two finish within $0.58$ of each other ($81.8$
+against $81.2$), so both rows look like they are approaching the same ceiling near
 $81.5$, and a larger gain from a lower start is what any ceiling produces regardless
 of mechanism. What the row does establish is simpler and independent of that: at
 $T{=}65$ the second pool buys nothing. Every cell-to-cell difference against
@@ -2481,7 +2481,7 @@ between them and a shared one would collapse the $T{=}65$ panel to a line. At
 $T{=}65$ memory is almost flat across operators and the plot is effectively an
 accuracy ranking; at $T{=}1025$ the state-space operators separate from softmax
 attention horizontally, which is the property the linear-time recurrence buys. The
-shared axis is stretched by one point, VSSD-$\gamma$ with both encodings at $18.94$
+shared axis is stretched by one point, VSSD-$\gamma$ with both encodings at $18.9$
 (\S\ref{sec:ablation}), which compresses the rest. The CNN appears only in the
 $T{=}65$ panel: it does not tokenise, so it has no token count for the right panel to
 place it at, and its memory does not sit on the same scaling curve the panel is
@@ -2539,7 +2539,7 @@ scan operators, with 2-D RoPE on throughout.
 Two things the grid does \emph{not} establish, both because of the $0.67$-point
 repeat spread in the caption. Four-directional scanning is not shown to beat
 two-directional: their best cells differ by $0.50$, inside the noise. And the
-best cell overall, 4-directional with 2-D RoPE at $83.28$, leads softmax
+best cell overall, 4-directional with 2-D RoPE at $83.3$, leads softmax
 attention by $2.36$ --- above the spread, but on a single seed at one recipe, so
 it is a result to reproduce rather than to quote.
 
@@ -2552,7 +2552,7 @@ composition no longer reduced to a function of $i-j$. Measured as the departure 
 the score matrix from Toeplitz on constant content, the violation was
 $1.3\times10^{-2}$ against $2.2\times10^{-7}$ once matched --- five orders of
 magnitude --- and it cost the 2-directional operator $12$ points: $70.2$ with both
-encodings enabled, against $82.78$ with 2-D RoPE alone and $81.59$ with the rotary
+encodings enabled, against $82.8$ with 2-D RoPE alone and $81.6$ with the rotary
 alone.
 
 All three single-encoding cells were re-measured under the corrected pairing, so
@@ -2681,12 +2681,12 @@ full runs say so plainly. At $30$ epochs with the spread pinned to one turn
 \begin{tabular}{|l|cc|cc|}
 \hline
 $T{=}1025$ & no encoding & 1-turn rotary & 2-D RoPE & 1-turn rotary $+$ 2-D RoPE \\ \hline
-VSSD-$\gamma$ & $63.88$ & $58.98$ & $\mathbf{70.10}$ & $64.83$ \\ \hline
-VSSD-$\beta,\gamma$ & $66.90$ & $59.69$ & $\mathbf{71.44}$ & $65.44$ \\ \hline
+VSSD-$\gamma$ & $63.9$ & $59.0$ & $\mathbf{70.1}$ & $64.8$ \\ \hline
+VSSD-$\beta,\gamma$ & $66.9$ & $59.7$ & $\mathbf{71.4}$ & $65.4$ \\ \hline
 \end{tabular}
 \end{center}
-The repair is worth $+40$ points against the collapsed cells ($19.14$ and $19.35$),
-and $+46$ where both encodings are on ($18.94$ and $18.47$). But the bounded rotary
+The repair is worth $+40$ points against the collapsed cells ($19.1$ and $19.4$),
+and $+46$ where both encodings are on ($18.9$ and $18.5$). But the bounded rotary
 alone still trails \emph{no encoding at all}, and adding it to 2-D RoPE still costs
 five to six points against 2-D RoPE alone. It stops destroying the model without
 becoming useful.
