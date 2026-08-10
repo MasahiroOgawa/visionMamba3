@@ -2456,9 +2456,10 @@ on the same GPU. Two cautions in reading small differences: repeat runs of one
 configuration differed by $0.67$ points, so gaps below $\sim$$0.7$ are not
 meaningful, and every cell is a single seed. The VSSD-$\beta,\gamma$ rows are not
 parameter-matched with the rest ($2.93$\,M against $2.71$\,M); see the Par.\ column.
-Enc.: ``---'' neither encoding, ``rotary'' Mamba-3's complex rotary alone,
-``2-D RoPE'' the external encoding alone, and the two named together when both are on.
-``1-turn'' marks the pinned-spread rotary of \eqref{eq:rope-turns}. ``n/a'' marks
+Enc.\ takes one of: ``---'' no encoding; ``2-D RoPE'' the external
+encoding; ``rotary'' Mamba-3's own complex-SSM rotary; ``1-turn rotary'' that same rotary
+with its spread pinned by \eqref{eq:rope-turns}; and two names joined by ``$+$'' for the
+corresponding combination. ``n/a'' marks
 the CNN's $T{=}1025$ cells: a ResNet does not tokenise, so it has no sequence length,
 and the patch size it was nominally run at changes nothing about the network; it is
 reported at $T{=}65$ only, and is likewise absent from
@@ -2924,10 +2925,11 @@ and are reported as such.
   tr/.style   = {draw=cTrain!80!black, fill=cTrain!22, rounded corners=1pt,
                  minimum width=30mm, minimum height=5.0mm, align=center},
   % \footnotesize, not \scriptsize: the paper's font floor forbids anything smaller,
-  % and this figure should stay liftable into it. Hierarchy comes from colour and
-  % italics instead of size. White fill so the "x 12 blocks" note masks the arrow it
-  % sits on rather than overprinting it.
-  note/.style = {font=\footnotesize\itshape, text=black!55, align=center,
+  % and this figure should stay liftable into it. Hierarchy comes from ITALICS alone --
+  % this used to be text=black!55 and grey glyphs are not reliably readable in print, so
+  % de-emphasis must not come from colour. White fill so the "x 12 blocks" note masks the
+  % arrow it sits on rather than overprinting it.
+  note/.style = {font=\footnotesize\itshape, align=center,
                  fill=white, inner sep=1.2pt},
   hd/.style   = {font=\small\bfseries, align=center},
   ar/.style   = {-latex, draw=black!55, shorten >=1pt, shorten <=1pt},
@@ -3211,7 +3213,7 @@ one-variable comparison against a measured baseline:
 \midrule
 DA3-SMALL (zero-shot)      & $\mathbf{0.0417}$ & $0.9743$ & $\mathbf{0.0796}$ & $\mathbf{0.0175}$ \\
 bidirectional (CM22)       & $0.0531$ & $\mathbf{0.9972}$ & $0.1012$ & $0.0229$ \\
-VSSD-$\beta,\gamma$ (ours) & $0.0583$ & $0.9812$ & $0.1154$ & $0.0254$ \\
+VSSD-$\beta,\gamma$        & $0.0583$ & $0.9812$ & $0.1154$ & $0.0254$ \\
 \bottomrule
 \end{tabular}
 \end{center}
