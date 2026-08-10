@@ -137,22 +137,30 @@ class DepthStudent(nn.Module):
         if images.dim() == 5:
             return images
         if images.dim() == 4:
-            return images.unsqueeze(1)
-        raise ValueError(f"expected (B, S, 3, H, W) or (B, 3, H, W); got {tuple(images.shape)}")
+            # (N, 3, H, W) is N views of ONE scene -> (1, N, 3, H, W), not N scenes of one
+            # view. The distinction is not cosmetic: cross-view attention and
+            # ref_view_strategy="first" both operate along S, so folding views into B
+            # would silently give each image its own reference and remove the cross-view
+            # signal. The teacher is unsqueezed the same way in depth/da3.py.
+            return images.unsqueeze(0)
+        raise ValueError(f"expected (B, S, 3, H, W) or (N, 3, H, W); got {tuple(images.shape)}")
 
     def features(self, images: Tensor) -> list[Tensor]:
         """Per-exported-layer patch tokens, before the bridge. (B, S, T, embed_dim) each.
 
-        DA3's ``get_intermediate_layers`` returns ``(per_layer, aux)``, and each per-layer
-        entry is itself ``(patch_tokens, class_token)``. The view axis is kept: DualDPT
-        unpacks ``B, S, N, C`` and fails if views have been folded into the batch. Use
-        :func:`flatten_views` where a per-image view is wanted instead.
+        Taken from the ``aux`` output via ``export_feat_layers``, which is the
+        single-stream ``embed_dim`` path -- the same call the teacher uses, so distillation
+        compares like with like. The main ``n=`` output would instead give ``2*embed_dim``
+        once ``cat_token`` is on, which the teacher has and we do not.
+
+        The view axis is kept: DualDPT unpacks ``B, S, N, C`` and fails if views have been
+        folded into the batch. Use :func:`flatten_views` where a per-image view is wanted.
         """
-        per_layer, _aux = self.vit.get_intermediate_layers(
-            self._as_multiview(images), n=self.export_layers, reshape=False, norm=True,
+        _main, aux = self.vit.get_intermediate_layers(
+            self._as_multiview(images), n=1,
+            export_feat_layers=list(self.export_layers), ref_view_strategy="first",
         )
-        return [entry[0] if isinstance(entry, (tuple, list)) else entry
-                for entry in per_layer]
+        return list(aux)
 
     def bridged(self, images: Tensor) -> list[Tensor]:
         """Per-exported-layer tokens after the bridge. (B, S, T, 2*embed_dim) each."""

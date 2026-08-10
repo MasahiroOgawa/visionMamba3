@@ -66,19 +66,25 @@ def dualdpt_depth(head: nn.Module, feats: Sequence[Tensor], height: int, width: 
     if len(feats) != 4:
         raise ValueError(f"DualDPT expects exactly 4 feature layers, got {len(feats)}")
     out = head([(f,) for f in feats], height, width, patch_start_idx=0)
-    return out[getattr(head, "head_main", "depth")].squeeze(1)
+    depth = out[getattr(head, "head_main", "depth")]
+    # (B, S, H, W) or (B, S, 1, H, W) -> (B*S, H, W): metrics score images, not scenes.
+    if depth.dim() == 5:
+        depth = depth.squeeze(2)
+    return depth.flatten(0, 1) if depth.dim() == 4 else depth
 
 
 @torch.no_grad()
 def teacher_features(da3_model, images: Tensor, layers: Sequence[int]) -> list[Tensor]:
-    """Teacher patch tokens at ``layers``, shaped (N, T, D) to match the student's.
+    """Teacher patch tokens at ``layers``, shaped (B, S, T, embed_dim).
 
-    The teacher runs with ``cat_token`` as DA3 ships it, so its features are twice the
-    student's width; the distillation loss is responsible for reconciling that, not this
-    function.
+    Uses the ``aux`` / ``export_feat_layers`` path, which is single-stream ``embed_dim``
+    (384 for DA3-SMALL) and therefore the same width as the student. The main ``n=``
+    output is ``2*embed_dim`` because the teacher ships with ``cat_token`` on, and matching
+    against that would compare a 384-d student to a 768-d teacher.
     """
     vit = da3_model.model.backbone.pretrained
     x = images if images.dim() == 5 else images.unsqueeze(0)
-    per_layer, _aux = vit.get_intermediate_layers(x, n=tuple(layers), reshape=False, norm=True)
-    toks = [e[0] if isinstance(e, (tuple, list)) else e for e in per_layer]
-    return [t.flatten(0, 1) if t.dim() == 4 else t for t in toks]
+    _main, aux = vit.get_intermediate_layers(
+        x, n=1, export_feat_layers=list(layers), ref_view_strategy="first",
+    )
+    return list(aux)
