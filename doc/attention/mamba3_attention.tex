@@ -131,7 +131,7 @@ We summarize the symbols used throughout. The names match
   \item $\Delta_t \in \mathbb{R}_{>0}$ is a data-dependent step size.
   \item $A_t \in \mathbb{R}_{<0}$ is a data-dependent (in Mamba-3) or
         data-independent (in Mamba-2) scalar that governs decay.
-  \item $\bm{h}_t \in \mathbb{R}^{N\times D}$ is the hidden state at time $t$
+  \item $\bm{h}_t \in \mathbb{R}^{N}$ is the hidden state at time $t$
         (SISO; see \S\ref{sec:mimo} for MIMO).
   \item $\bm{Y} \in \mathbb{R}^{T\times D}$ is the output sequence.
 \end{itemize}
@@ -225,19 +225,23 @@ algorithm calls for it.
 Before any discretisation choice, a state-space model is the linear
 recurrence
 \begin{equation}\label{eq:ssm}
-  \bm{h}_t = A_t\,\bm{h}_{t-1} + \bm{B}_t\bm{x}_t^\top,
+  \bm{h}_t = A_t\,\bm{h}_{t-1} + \bm{B}_t x_t,
   \qquad
-  \bm{y}_t = \bm{h}_t^\top\bm{C}_t,
+  y_t = \bm{C}_t^\top\bm{h}_t,
 \end{equation}
-where $A_t \in \mathbb{R}$ and $\bm{B}_t,\bm{C}_t \in \mathbb{R}^{N}$, as
-listed in \S\ref{sec:sizes}. Note the shapes: $\bm{B}_t\bm{x}_t^\top$ is an
-\emph{outer} product $\mathbb{R}^{N}\times\mathbb{R}^{D}\to\mathbb{R}^{N\times D}$,
-so the state is a matrix --- each of the $D$ channels carries its own
-$N$-dimensional state, decayed by the same scalar $A_t$ --- and the
-read-out $\bm{h}_t^\top\bm{C}_t$ returns a $D$-vector. Below we write
-$\bm{B}_j\bm{x}_j$ for this outer product throughout, which is what makes
-$\bm{C}_t^\top\bm{B}_j$ a scalar multiplying $\bm{x}_j$ in
-\S\ref{sec:state-to-output}. Everything in this subsection is a
+following \cite{mamba3} \S2.2. Note which symbols are scalars: as in that
+paper, plain letters denote scalars and bold letters tensors, so the
+\emph{input} $x_t \in \mathbb{R}$ and the output $y_t \in \mathbb{R}$ are
+single numbers, while $\bm{h}_t,\bm{B}_t,\bm{C}_t \in \mathbb{R}^{N}$.
+$A_t \in \mathbb{R}_{<0}$ is likewise a scalar: the state transition is
+$\bm{A}_t = A_t\bm{I}_{N\times N}$, a scalar times identity, which is the
+parameterisation that makes the duality of \S\ref{sec:ssd} hold at all.
+
+The SSM is therefore defined on \emph{one channel}. A token
+$\bm{x}_t \in \mathbb{R}^{D}$ has $D$ of them; they share
+$A_t,\bm{B}_t,\bm{C}_t,\Delta_t$ and run as $D$ independent copies of
+\eqref{eq:ssm}, and stacking their outputs over channels and time is what
+produces the parallel form \eqref{eq:ssd} with $\bm{X} \in \mathbb{R}^{T\times D}$. Everything in this subsection is a
 choice of how to turn $A_t$ and the step size $\Delta_t$ into per-step
 coefficients; the scalar $A_t$, rather than an $N\times N$ matrix, is
 what makes the duality of \S\ref{sec:ssd} hold at all.
