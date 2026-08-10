@@ -32,6 +32,33 @@ from depth.student import DepthStudent, flatten_views
 EXPORT_LAYERS = (5, 7, 9, 11)
 
 
+def _survive_cudnn_mismatch() -> None:
+    """Fall back to cuDNN-free convolutions if the installed cuDNN cannot finalize.
+
+    On a machine where a system-wide cuDNN outranks the wheel's own on the loader path,
+    torch raises CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH on the first convolution -- here,
+    a system 9.25 supplying `libcudnn_engines_tensor_ir` that the pip 9.20 does not ship.
+    Only the DPT head convolves, and the non-cuDNN path costs nothing measurable at these
+    sizes, so the run continues rather than dying at step 0.
+
+    This is a workaround, not a fix. The fix is to remove the system cuDNN so the wheel's
+    own is used; the message says so rather than letting a silent fallback hide it.
+    """
+    if not torch.cuda.is_available() or not torch.backends.cudnn.enabled:
+        return
+    try:
+        torch.nn.functional.conv2d(
+            torch.zeros(1, 1, 8, 8, device="cuda"), torch.zeros(1, 1, 3, 3, device="cuda")
+        )
+    except RuntimeError as e:
+        if "CUDNN" not in str(e).upper():
+            raise
+        torch.backends.cudnn.enabled = False
+        print("[depth] cuDNN unusable on this host (sublibrary version mismatch); "
+              "running convolutions without it. Remove the system cuDNN to restore it.",
+              flush=True)
+
+
 def feature_loss(student_feats: list[Tensor], teacher_feats: list[Tensor]) -> Tensor:
     """Per-layer L2 + (1 - cosine), the distillation objective.
 
@@ -65,9 +92,9 @@ def silog_loss(pred: Tensor, gt: Tensor, valid: Tensor, lam: float = 0.85) -> Te
     return total / max(n, 1)
 
 
-def _student(mixer: str, img_size: int, device: str) -> DepthStudent:
+def _student(mixer: str, img_size: int, device: str, chunk_size: int | None = None) -> DepthStudent:
     return DepthStudent(mixer=mixer, img_size=img_size, patch_size=14,
-                        export_layers=EXPORT_LAYERS).to(device)
+                        chunk_size=chunk_size, export_layers=EXPORT_LAYERS).to(device)
 
 
 def _save(path: Path, student: DepthStudent, head: torch.nn.Module | None, meta: dict) -> None:
@@ -89,7 +116,8 @@ def _load_into(ckpt: Path, student: DepthStudent, head: torch.nn.Module | None) 
 
 def cmd_distill(a) -> None:
     dev = a.device
-    student = _student(a.mixer, a.img_size, dev)
+    _survive_cudnn_mismatch()
+    student = _student(a.mixer, a.img_size, dev, a.chunk_size)
     teacher = load_da3(a.teacher, device=dev)
     params = student.trainable("mixer")
     opt = torch.optim.AdamW(params, lr=a.lr_mixer, weight_decay=0.05)
@@ -117,7 +145,8 @@ def cmd_distill(a) -> None:
 
 def cmd_finetune(a) -> None:
     dev = a.device
-    student = _student(a.mixer, a.img_size, dev)
+    _survive_cudnn_mismatch()
+    student = _student(a.mixer, a.img_size, dev, a.chunk_size)
     da3 = load_da3(a.teacher, device=dev)
     head = dualdpt(da3)
     if a.init:
@@ -158,7 +187,8 @@ def cmd_finetune(a) -> None:
 @torch.no_grad()
 def cmd_eval(a) -> None:
     dev = a.device
-    student = _student(a.mixer, a.img_size, dev)
+    _survive_cudnn_mismatch()
+    student = _student(a.mixer, a.img_size, dev, a.chunk_size)
     da3 = load_da3(a.teacher, device=dev)
     head = dualdpt(da3)
     if a.ckpt:
@@ -192,6 +222,11 @@ def main() -> None:
         p.add_argument("--device", default="cuda")
         p.add_argument("--seed", type=int, default=0)
         p.add_argument("--log-every", type=int, default=100)
+        p.add_argument("--chunk-size", type=int, default=None,
+                       help="Build the scan mask in row chunks instead of a full T x T. "
+                            "Cuts memory and COSTS speed (measured 3x slower at 504px), so "
+                            "leave off unless a view count does not otherwise fit. Ignored "
+                            "by the collapse variants, which have no T x T mask.")
 
     d = sub.add_parser("distill", help="Phase B: match the teacher's features")
     common(d); d.add_argument("--steps", type=int, default=20000)

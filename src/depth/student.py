@@ -55,13 +55,18 @@ class _MixerBlock(nn.Module):
     """
 
     def __init__(self, dim: int, num_heads: int = 6, *, mixer: str = "vssd_bg",
-                 state_dim: int = 64, rope: Optional[nn.Module] = None,
+                 state_dim: int = 64, chunk_size: Optional[int] = None,
+                 rope: Optional[nn.Module] = None,
                  proj_bias: bool = True, **_ignored) -> None:
         super().__init__()
         common = dict(dim=dim, num_heads=num_heads, state_dim=state_dim,
                       rope=rope, out_proj=True, proj_bias=proj_bias)
         if mixer == "bidirectional":
-            self.inner = Mamba3SelfAttention(bidirectional=True, three_term=True, **common)
+            # chunk_size matters only for the scan operators, which materialise mask rows.
+            # At 504px T is 1296 and the full T x T mask is an order of magnitude slower.
+            # The collapse variants have no T x T mask and ignore it.
+            self.inner = Mamba3SelfAttention(bidirectional=True, three_term=True,
+                                             chunk_size=chunk_size, **common)
         elif mixer == "vssd":
             self.inner = Mamba3VSSDAttention(**common)
         elif mixer == "vssd_bg":
@@ -109,14 +114,15 @@ class DepthStudent(nn.Module):
     """
 
     def __init__(self, *, mixer: str = "vssd_bg", img_size: int = 504,
-                 patch_size: int = 14, state_dim: int = 64,
+                 patch_size: int = 14, state_dim: int = 64, chunk_size: Optional[int] = 128,
                  export_layers: tuple[int, ...] = (5, 7, 9, 11)) -> None:
         super().__init__()
         self.mixer = mixer
         self.img_size = img_size
         self.export_layers = tuple(export_layers)
 
-        attn_class = partial(_MixerBlock, mixer=mixer, state_dim=state_dim)
+        attn_class = partial(_MixerBlock, mixer=mixer, state_dim=state_dim,
+                             chunk_size=chunk_size)
         self.vit = vit_small(
             img_size=img_size,
             patch_size=patch_size,
