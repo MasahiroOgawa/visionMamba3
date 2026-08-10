@@ -234,8 +234,10 @@ paper, plain letters denote scalars and bold letters tensors, so the
 \emph{input} $x_t \in \mathbb{R}$ and the output $y_t \in \mathbb{R}$ are
 single numbers, while $\bm{h}_t,\bm{B}_t,\bm{C}_t \in \mathbb{R}^{N}$.
 $A_t \in \mathbb{R}_{<0}$ is likewise a scalar: the state transition is
-$\bm{A}_t = A_t\bm{I}_{N\times N}$, a scalar times identity, which is the
-parameterisation that makes the duality of \S\ref{sec:ssd} hold at all.
+$\bm{A}_t = A_t\bm{I}_{N\times N}$, a scalar times identity. That choice
+is what the duality of \S\ref{sec:ssd} rests on;
+\S\ref{sec:state-to-output} isolates the single step where it is used and
+shows what breaks without it.
 
 The SSM is therefore defined on \emph{one channel}. A token
 $\bm{x}_t \in \mathbb{R}^{D}$ has $D$ of them; they share
@@ -243,8 +245,7 @@ $A_t,\bm{B}_t,\bm{C}_t,\Delta_t$ and run as $D$ independent copies of
 \eqref{eq:ssm}, and stacking their outputs over channels and time is what
 produces the parallel form \eqref{eq:ssd} with $\bm{X} \in \mathbb{R}^{T\times D}$. Everything in this subsection is a
 choice of how to turn $A_t$ and the step size $\Delta_t$ into per-step
-coefficients; the scalar $A_t$, rather than an $N\times N$ matrix, is
-what makes the duality of \S\ref{sec:ssd} hold at all.
+coefficients.
 
 Mamba-3 uses the \emph{exponential-trapezoidal} discrete recurrence of
 \cite{mamba3} eq.~(5)–(6):
@@ -415,9 +416,49 @@ $\bm{y}_t = \bm{C}_t^\top\bm{h}_t$:
         \underbrace{\bigl(a_{t\leftarrow j}\,\gamma_j\bigr)}_{=:\,L_{tj}}
         \bigl(\bm{C}_t^\top \bm{B}_j\bigr)\,\bm{x}_j. \label{eq:yout-L}
 \end{align}
-The key observation is that $\bm{x}_j$ is a vector while
-$\bm{C}_t^\top\bm{B}_j$ is a scalar; we are free to reorder the
-factors.
+The key observation is that $\bm{C}_t^\top\bm{B}_j$ is a scalar, so it
+commutes with everything else in the summand and we are free to reorder
+the factors. (From \eqref{eq:ssm} onward we carry all $D$ channels at
+once: $\bm{x}_j\in\mathbb{R}^{D}$ is the whole token and
+$\bm{B}_j\bm{x}_j$ the outer product, so \eqref{eq:yout-L} is
+\eqref{eq:ssm}'s scalar read-out applied to the $D$ independent copies
+simultaneously.)
+
+\paragraph{Why $A_t$ must be a scalar.} Step \eqref{eq:yout} is the one
+place the scalar parameterisation
+$\bm{A}_t = A_t\bm{I}_{N\times N}$ (\S\ref{sec:decay}) is load-bearing,
+and it is worth isolating because nothing earlier in the derivation
+depends on it. With a scalar transition the accumulated decay is the
+scalar $a_{t\leftarrow j}=\prod_{k=j+1}^{t}\alpha_k$, so it slides out
+of the inner product untouched and \eqref{eq:yout-L} splits into
+\emph{a mask entry times an inner product}, $L_{tj}\,(\bm{C}_t^\top\bm{B}_j)$
+--- which is exactly the Hadamard structure
+$\bm{L}\odot\bm{C}\bm{B}^\top$ of \eqref{eq:ssd}.
+
+Now suppose $\bm{A}_t\in\mathbb{R}^{N\times N}$ were a general matrix.
+The accumulated transition becomes a \emph{matrix}
+$\bm{M}_{t\leftarrow j} := \prod_{k=j+1}^{t}e^{\Delta_k\bm{A}_k}$, and
+\eqref{eq:yout} instead reads
+\begin{equation}\label{eq:no-duality}
+  \bm{y}_t = \sum_{j=1}^{t}\gamma_j\,
+    \bigl(\bm{C}_t^\top\,\bm{M}_{t\leftarrow j}\,\bm{B}_j\bigr)\,\bm{x}_j .
+\end{equation}
+The coefficient is still a scalar, but it is a \emph{bilinear form} in
+$\bm{C}_t$ and $\bm{B}_j$ with a different matrix wedged between them
+for every pair $(t,j)$. It therefore cannot be written as
+$L_{tj}\,(\bm{C}_t^\top\bm{B}_j)$ for any choice of $L_{tj}$: the query
+and key no longer meet in a single inner product that a mask can
+modulate. There is no $\bm{L}$, and no
+$\bm{L}\odot\bm{C}\bm{B}^\top$ form --- the duality does not merely
+become inconvenient, it stops existing.
+
+Diagonal $\bm{A}_t=\mathrm{Diag}(\bm{a}_t)$ is the intermediate case:
+$\bm{M}_{t\leftarrow j}$ is then diagonal and
+$\bm{C}_t^\top\bm{M}_{t\leftarrow j}\bm{B}_j
+= \sum_n M^{(n)}_{t\leftarrow j}\,C_t^{(n)}B_j^{(n)}$ is a
+\emph{per-channel-weighted} inner product. That is a sum of $N$ masked
+attentions rather than one, which is why Mamba-2 chose the scalar case:
+it is the strongest transition for which a single $\bm{L}$ suffices.
 
 \subsection{Matrix form: \texorpdfstring{$\bm{Y} = (\bm{L}\odot \bm{C}\bm{B}^\top)\bm{X}$}{Y = (L .* C B-transpose) X}}
 
