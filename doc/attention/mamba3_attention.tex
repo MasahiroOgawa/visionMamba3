@@ -3161,11 +3161,11 @@ budget. The two systems are different architectures:
 \toprule
  & legacy (\texttt{ssm3d}, $0.0531$) & current (\texttt{mamba3\_attn}, $0.159$ best) \\
 \midrule
-backbone   & built from scratch, Mamba-3   & pretrained DA3-SMALL, \\
-           & injected via \texttt{block\_fn} & \texttt{block.attn} replaced in place \\
-weights    & DA3's copied in, all
-             \texttt{.attn.*} skipped        & everything but the mixer untouched \\
-           & ($125/282$ tensors, $80$ skipped) & by construction \\
+how it is built & built from scratch, Mamba-3 & pretrained DA3-SMALL, \\
+\emph{(not the cause)} & injected at construction; DA3's & \texttt{block.attn} replaced \\
+           & weights copied in, all         & in place \\
+           & \texttt{.attn.*} skipped ($80$) & \\
+\midrule
 \texttt{cat\_token} & \textbf{False} --- one $384$-d stream & DA3's native \textbf{True} ($768$-d) \\
 feature path & \textbf{\texttt{DimBridge}} $384\!\to\!768$, & none added; DA3's own \\
  to the head & trained in Phase-C            & path used unchanged \\
@@ -3173,7 +3173,9 @@ feature path & \textbf{\texttt{DimBridge}} $384\!\to\!768$, & none added; DA3's 
 \end{tabular}
 \end{center}
 
-\noindent The load-bearing difference is the last row. DA3's DualDPT expects
+\noindent The first row is a construction detail and \emph{not} the cause, which is worth
+saying because it looks like one: either way every weight is pretrained except the mixer,
+which starts random. The load-bearing difference is the last row. DA3's DualDPT expects
 $768$-dimensional input because \texttt{cat\_token=True} concatenates two
 $384$-d streams. The legacy student produced a single $384$-d stream and
 inserted a learnable \texttt{DimBridge} between backbone and head, initialised
@@ -3197,6 +3199,31 @@ GPU at $504^2$ with four views, at every chunk size from $128$ down to $16$
 (allocated stays near $10.7$\,GB --- it is stored activations across sixteen
 layers, not the mask blocks), and fits only at one view, which removes the
 multi-view signal the pipeline exists to use.
+
+\paragraph{VSSD-$\beta,\gamma$ in that architecture.} Running our operator through the
+same three-stage chain --- same data, same schedule, only the mixer swapped, so this is a
+one-variable comparison against a measured baseline:
+
+\begin{center}\small
+\begin{tabular}{lcccc}
+\toprule
+ & abs.\ rel.\,$\downarrow$ & $\delta{<}1.25$\,$\uparrow$ & RMSE\,$\downarrow$ & $\log_{10}$\,$\downarrow$ \\
+\midrule
+DA3-SMALL (zero-shot)      & $\mathbf{0.0417}$ & $0.9743$ & $\mathbf{0.0796}$ & $\mathbf{0.0175}$ \\
+bidirectional (CM22)       & $0.0531$ & $\mathbf{0.9972}$ & $0.1012$ & $0.0229$ \\
+VSSD-$\beta,\gamma$ (ours) & $0.0583$ & $0.9812$ & $0.1154$ & $0.0254$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent It does not overtake either, and loses on every metric, though it clears all four
+of the harness's acceptance gates. Two things temper reading much into the $0.0583$ against
+$0.0531$: it is a single seed over twelve images, with no repeat-spread estimate for ETH3D
+of the kind \S\ref{sec:cifar} has for CIFAR-10; and the recipe was tuned while watching
+bidirectional's numbers, so the honest claim is that VSSD-$\beta,\gamma$ is \emph{not
+better under bidirectional's recipe}, not that it is worse. It is consistent with CIFAR-10,
+where the two-pool variant matched VSSD-$\gamma$ within the repeat spread for more
+parameters.
 
 \paragraph{Next.} The legacy architecture is the one that works, so the
 follow-up is to put our operators inside it rather than to keep tuning the
