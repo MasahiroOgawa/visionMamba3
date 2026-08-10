@@ -228,10 +228,9 @@ recurrence
   \bm{h}_t = A_t\,\bm{h}_{t-1} + \bm{B}_t\bm{x}_t,
   \qquad
   \bm{y}_t = \bm{C}_t^\top\bm{h}_t,
-  \qquad
-  A_t \in \mathbb{R},\quad \bm{B}_t,\bm{C}_t \in \mathbb{R}^{N},
 \end{equation}
-with the shapes of \S\ref{sec:sizes}. Everything in this subsection is a
+where $A_t \in \mathbb{R}$ and $\bm{B}_t,\bm{C}_t \in \mathbb{R}^{N}$, as
+listed in \S\ref{sec:sizes}. Everything in this subsection is a
 choice of how to turn $A_t$ and the step size $\Delta_t$ into per-step
 coefficients; the scalar $A_t$, rather than an $N\times N$ matrix, is
 what makes the duality of \S\ref{sec:ssd} hold at all.
