@@ -216,6 +216,14 @@ def cmd_finetune(a) -> None:
             print(f"[finetune] step {step:6d}/{a.steps}  silog={l_silog.item():.4f}  "
                   f"edge={l_edge.item():.4f}  "
                   f"lr={opt.param_groups[0]['lr']:.2e}  [{sc.name}]", flush=True)
+        # Periodic checkpoints so a long run that starts degrading can still be scored at its
+        # best step instead of only at the last one. Depth accuracy on a held-out scene is not
+        # monotone in the training loss, so the final step is not reliably the best step.
+        if a.ckpt_every and step and step % a.ckpt_every == 0:
+            _save(Path(a.out) / f"ckpt_{step}.pt", student, head,
+                  {"phase": "finetune", "mixer": a.mixer, "steps": step,
+                   "unfreeze_head": a.unfreeze_head})
+            print(f"[finetune] wrote {Path(a.out) / f'ckpt_{step}.pt'}", flush=True)
     _save(Path(a.out) / "ckpt.pt", student, head,
           {"phase": "finetune", "mixer": a.mixer, "steps": a.steps, "unfreeze_head": a.unfreeze_head})
     print(f"[finetune] wrote {Path(a.out) / 'ckpt.pt'}", flush=True)
@@ -280,6 +288,8 @@ def main() -> None:
     f.add_argument("--lr-head", type=float, default=1e-5)
     f.add_argument("--unfreeze-head", action="store_true")
     f.add_argument("--augment", action="store_true")
+    f.add_argument("--ckpt-every", type=int, default=0,
+                   help="Also save ckpt_<step>.pt every N steps (0 = final checkpoint only).")
     f.add_argument("--lambda-edge", type=float, default=0.1,
                    help="Weight on edge-aware smoothness; 0.1 is the reference value, 0 disables.")
     f.add_argument("--out", type=Path, required=True)

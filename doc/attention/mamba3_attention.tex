@@ -3336,6 +3336,11 @@ on the other three metrics.
 \subsection{Reference numbers (legacy run)}
 \label{sec:eth3d-depth-legacy}
 
+
+\emph{Superseded.} These numbers come from the retired implementation and from an evaluation
+path that scores even the same frozen DA3-SMALL checkpoint differently from the current one.
+\S\ref{sec:eth3d-fixed} has the current results and explains why the two sets are not
+comparable.
 The numbers currently in the paper come from the run recorded as CM22@1000 in
 the retired \texttt{largescale3Dreconstruction\_\allowbreak{}using\_\allowbreak{}SSM} repository
 (pipeline \texttt{distill\_\allowbreak{}cm12/\allowbreak{}ckpt\_\allowbreak{}20000.pt} $\rightarrow$
@@ -3461,12 +3466,111 @@ better under bidirectional's recipe}, not that it is worse. It is consistent wit
 where the two-pool variant matched VSSD-$\gamma$ within the repeat spread for more
 parameters.
 
-\paragraph{Next.} The legacy architecture is the one that works, so the
-follow-up is to put our operators inside it rather than to keep tuning the
-current one: port \texttt{cat\_token=False} $+$ \texttt{DimBridge} into
-\texttt{mamba3\_attn} as a build option, then run VSSD-$\beta,\gamma$ and
-VSSD-$\gamma$ through it against the bidirectional $0.0531$, and against
-DA3-SMALL's $0.0417$.
+\paragraph{Superseded.} The numbers in this subsection and in
+\S\ref{sec:eth3d-depth-legacy} are kept as a record of the retired implementation. They are
+\emph{not} comparable with anything in \S\ref{sec:eth3d-fixed} below, for the reason given
+there, and the manuscript no longer quotes them.
+
+\subsection{The cause was a missing weight copy, and the corrected numbers}
+\label{sec:eth3d-fixed}
+
+\emph{Working memo, 2026-08-11.}
+
+\paragraph{The bug.} \texttt{DepthStudent.\_\_init\_\_} called \texttt{vit\_small(...)}, which
+builds a \emph{randomly initialised} ViT, and nothing ever copied DA3's pretrained weights into
+it. Because Phase B optimises only parameters matching \texttt{.inner.} (the mixer) and Phase C
+only mixer and bridge, everything not copied stayed at its random initialisation for the whole
+run: the patch embedding, all twelve MLP blocks, every LayerNorm, the cls token and the
+positional embedding. The retired implementation's log records the opposite ---
+\texttt{loaded 125/282 tensors (skipped\_attn=80, shape\_mismatch=1)} --- and we loaded none.
+
+The symptom is what made this hard to find. A trainable mixer can drive the distillation loss
+down against a random patch embedding by compensating for it across the ten training scenes, so
+the loss curves looked healthy at every stage and only the held-out scene exposed the problem.
+Two earlier hypotheses were tested and rejected before this one: the missing edge-smoothness
+term, and the summed-versus-averaged distillation loss. Both were real differences from the
+reference and both are now ported, but neither recovered the accuracy.
+
+\texttt{DepthStudent.init\_from\_da3} now reproduces the reference's own counts exactly
+($125$ loaded, \texttt{shape\_mismatch=1}), and \texttt{patch\_embed} is bit-identical to
+DA3's. The scan operators report \texttt{125/282} and VSSD-$\gamma$ \texttt{125/270}, differing
+only because their mixers hold different numbers of internal tensors.
+
+\paragraph{Ruled out by measurement, so as not to be re-checked.} Resolution
+(\texttt{pos\_embed} is $(1,1297,384)$ on both sides, i.e.\ $504$\,px), the per-layer
+distillation projector (built only when teacher and student widths differ; both are $384$ for
+DA3-SMALL, so it never activated), token alignment ($1296$ patch tokens on both sides, no prefix
+tokens, verified by probe), the data loader (identical centre crop, \textsc{bilinear} for RGB and
+\textsc{nearest} for depth), and augmentation in the final stage (which \emph{helped}:
+$0.0994$ at $500$ steps against $0.0836$ at $1500$).
+
+\paragraph{The two evaluators are not on one scale.} This is why the legacy numbers above cannot
+be placed beside the ones below. The \emph{same frozen} public DA3-SMALL checkpoint scores
+\begin{center}\small
+\begin{tabular}{lcl}
+\toprule
+measurement path & abs.\ rel. & note \\
+\midrule
+retired repo's evaluator          & $0.0417$ & \S\ref{sec:eth3d-depth-legacy}'s baseline \\
+DA3's packaged multi-view inference & $0.0236$ & not a backbone comparison; see below \\
+backbone $\to$ DualDPT, this repo  & $0.0323$ & the baseline used below \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent Only the third is a valid control. DA3 ships an inference routine that additionally
+selects a reference view and estimates cameras, and scoring through it gives $0.0236$ with
+$\delta{<}1.25$ exactly $1.0000$ --- but the student receives none of that machinery, so it
+measures the pipeline rather than the backbone. Taking DA3's own backbone features through the
+same DualDPT path the student uses isolates the mixer as the only difference.
+
+\paragraph{All three operators, one evaluator, one recipe.} Phase B $20\,000$ steps at
+lr $3\times10^{-4}$, then Phase C $500$ steps head-frozen and $1000$ head-unfrozen, SILog
+$+\,0.1\times$ edge-aware smoothness, no augmentation, \texttt{terrains} held out:
+\begin{center}\small
+\begin{tabular}{lcccc}
+\toprule
+mixer & abs.\ rel.\,$\downarrow$ & $\delta{<}1.25$\,$\uparrow$ & RMSE\,$\downarrow$ & $\log_{10}$\,$\downarrow$ \\
+\midrule
+softmax (DA3-SMALL, zero-shot)  & $\mathbf{0.0323}$ & $\mathbf{1.0000}$ & $\mathbf{0.0605}$ & $\mathbf{0.0141}$ \\
+\midrule
+VSSD-$\beta,\gamma$ (iv)        & $0.0663$ & $0.9617$ & $0.1326$ & $0.0298$ \\
+bidirectional (i)               & $0.0695$ & $0.9682$ & $0.1335$ & $0.0309$ \\
+VSSD-$\gamma$ (iii)             & $0.0738$ & $0.9612$ & $0.1403$ & $0.0331$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Read carefully, this says less than the ordering suggests. The three operators span
+$0.0075$ in absolute relative error, which is \emph{smaller} than the per-view standard
+deviation of $0.014$--$0.016$ that the runs reporting it measured across these same twelve
+views, and each row is a single seed. The operators are therefore not distinguishable here, and
+the ordering is not a ranking. The one observation worth carrying forward is directional:
+VSSD-$\beta,\gamma$ exceeds VSSD-$\gamma$ by $0.0075$, the same sign as CIFAR-10 at
+$T{=}1025$ (\S\ref{sec:ablation}), where the second pool gained $3.0$ points. Two tasks
+pointing the same way is mild support for the two-pool derivation of \S\ref{sec:two-pools} and
+nothing stronger.
+
+\paragraph{The fix helped, and does not explain the shortfall.} Seeding the backbone moved the
+bidirectional arm from $0.0836$ to $0.0695$, a $17\%$ relative improvement, and the bug was
+unambiguously real. It was nevertheless predicted to recover more than it did: the retired
+pipeline sat at $1.27\times$ its own DA3 baseline ($0.0531$ against $0.0417$), so the equivalent
+target here was about $0.041$. All three arms instead sit at $2.0$--$2.3\times$ the
+$0.0323$ baseline. Something beyond the missing weights remains unaccounted for, and this note
+does not claim to know what it is.
+
+\paragraph{In flight.} Phase C is being extended by $9000$ steps for all three arms, continuing
+from their $1000$-step checkpoints so the final stage totals $10\,000$, with intermediate
+checkpoints scored at $3000$, $6000$, $9000$ and $10\,000$. The intermediate scoring is
+deliberate: held-out depth error is not monotone in the training loss, and an earlier long run
+in this project degraded while its loss kept falling, so the best step has to be identifiable
+after the fact rather than assumed to be the last one.
+
+\paragraph{One further bug, found in review before it affected a result.} The ported
+edge-smoothness term was called as \texttt{edge\_aware\_smoothness(pred, imgs.flatten(0, 1))}.
+\texttt{Scene.images} is $(N,3,S,S)$, so that collapsed the image axis together with the colour
+channels and the image-gradient mean was taken over all of them at once, then broadcast back to
+every image; broadcasting accepted the wrong shape silently instead of raising. It is fixed, with
+an assertion on the shape, and the $0.0933$ measurement that used it is void.
 
 \subsection{What this repository provides}
 \label{sec:eth3d-depth-harness}
