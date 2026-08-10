@@ -74,6 +74,11 @@ class _MixerBlock(nn.Module):
         return self.inner(x, pos=pos, attn_mask=attn_mask)
 
 
+def flatten_views(feats: list[Tensor]) -> list[Tensor]:
+    """(B, S, T, D) -> (B*S, T, D), for losses and metrics that score images not scenes."""
+    return [f.flatten(0, 1) if f.dim() == 4 else f for f in feats]
+
+
 class DimBridge(nn.Module):
     """Learnable ``in_dim -> 2*in_dim`` map, initialised to ``cat([x, x], -1)``.
 
@@ -136,22 +141,21 @@ class DepthStudent(nn.Module):
         raise ValueError(f"expected (B, S, 3, H, W) or (B, 3, H, W); got {tuple(images.shape)}")
 
     def features(self, images: Tensor) -> list[Tensor]:
-        """Per-exported-layer patch tokens, before the bridge. (B*S, T, embed_dim) each.
+        """Per-exported-layer patch tokens, before the bridge. (B, S, T, embed_dim) each.
 
         DA3's ``get_intermediate_layers`` returns ``(per_layer, aux)``, and each per-layer
-        entry is itself ``(patch_tokens, class_token)`` shaped ``(B, S, T, D)`` and
-        ``(B, S, D)``. We keep the patch tokens and fold views into the batch, which is
-        what both the distillation loss and the depth head consume.
+        entry is itself ``(patch_tokens, class_token)``. The view axis is kept: DualDPT
+        unpacks ``B, S, N, C`` and fails if views have been folded into the batch. Use
+        :func:`flatten_views` where a per-image view is wanted instead.
         """
         per_layer, _aux = self.vit.get_intermediate_layers(
             self._as_multiview(images), n=self.export_layers, reshape=False, norm=True,
         )
-        patch_tokens = [entry[0] if isinstance(entry, (tuple, list)) else entry
-                        for entry in per_layer]
-        return [f.flatten(0, 1) if f.dim() == 4 else f for f in patch_tokens]
+        return [entry[0] if isinstance(entry, (tuple, list)) else entry
+                for entry in per_layer]
 
     def bridged(self, images: Tensor) -> list[Tensor]:
-        """Per-exported-layer tokens after the bridge. (B, T, 2*embed_dim) each."""
+        """Per-exported-layer tokens after the bridge. (B, S, T, 2*embed_dim) each."""
         return [b(f) for b, f in zip(self.bridges, self.features(images))]
 
     def trainable(self, scope: str) -> list[nn.Parameter]:

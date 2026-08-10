@@ -20,7 +20,10 @@ eval = [
 ]
 depth = [
     "addict>=2.4.0",
+    "evo>=1.37.0",
+    "imageio>=2.37.4",
     "omegaconf>=2.3.1",
+    "opencv-python-headless>=4.11.0.86",
     "safetensors>=0.8.0",
     "timm>=1.0.28",
 ]
