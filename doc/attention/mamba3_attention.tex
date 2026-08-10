@@ -1078,7 +1078,90 @@ angles
 \end{equation}
 where $\theta^{\text{row}},\theta^{\text{col}}$ are learned or fixed
 frequency vectors. Replace $\bm{\theta}_t$ in \eqref{eq:Rdef} by
-$\theta_{r,c}$ for the patch at $(r,c)$. The resulting
+$\theta_{r,c}$ for the patch at $(r,c)$.
+
+\paragraph{Reading \eqref{eq:rope2d} term by term.}
+Every symbol in \eqref{eq:rope2d} is worth naming explicitly, because the
+equation is compact and each index means something different.
+
+\begin{itemize}
+  \item $(r,c)$ is the patch's \emph{position on the grid}: $r$ its row, $c$ its
+        column, both plain integers. A token does not know anything else about
+        where it is.
+  \item $n$ indexes a \emph{rotation plane}, not a channel. A rotation happens
+        in a plane, so it needs two coordinates: the $N$ channels of $\bm{B}_j$
+        and $\bm{C}_i$ are taken in adjacent pairs
+        $(1,2),(3,4),\dots$, and plane $n$ is the $n$-th such pair. That is why
+        $n$ runs to $N/2$ and not to $N$.
+  \item $\theta^{\text{row}}[n]$ and $\theta^{\text{col}}[n]$ are \emph{rates}, in
+        radians per unit of position. Plane $n$ turns by
+        $\theta^{\text{row}}[n]$ radians for every row you move down and by
+        $\theta^{\text{col}}[n]$ radians for every column you move right, and
+        \eqref{eq:rope2d} just adds the two contributions.
+\end{itemize}
+
+\noindent So the whole encoding is: \emph{give each plane a turning rate, and
+rotate it by (rate $\times$ distance travelled)}. Position enters only as an
+angle.
+
+\paragraph{Why an angle encodes \emph{relative} position for free.}
+Rotations compose by adding angles, and the SSD score
+\eqref{eq:self-rope} contains $\widetilde{\bm{C}}_i^\top\widetilde{\bm{B}}_j$,
+i.e.\ one rotation transposed against the other:
+\begin{equation}
+  \bm{R}(\theta_i)^\top\bm{R}(\theta_j) \;=\; \bm{R}(\theta_j-\theta_i).
+\end{equation}
+The absolute angles cancel and only the difference survives. With
+\eqref{eq:rope2d} that difference is
+$\theta^{\text{row}}[n](r_j-r_i)+\theta^{\text{col}}[n](c_j-c_i)$: the score
+between two patches depends on how far apart they are on the grid, not on where
+either one sits. This is the entire point of the construction.
+
+\paragraph{The rates form a ladder of ``rulers''.}
+A single rate would be ambiguous, since an angle wraps every $2\pi$. The
+implementation therefore uses a geometric ladder,
+\begin{equation}\label{eq:rope2d-ladder}
+  \theta[n] \;=\; \text{base}^{-n/(N/4)},
+  \qquad n = 0,1,\dots,\tfrac{N}{4}-1,
+  \qquad \text{base} = 100 ,
+\end{equation}
+so the planes measure distance at different scales at once. With the
+$N=64$ state used in the CIFAR-10 study this is $16$ planes per axis, with
+rates from $\theta[0]=1$ radian per patch --- a fine ruler that wraps every
+$\approx 6$ patches --- down to
+$\theta[15]=100^{-15/16}\approx0.013$ radian per patch, a coarse ruler that
+would need $\approx 470$ patches to complete one turn. Fine planes resolve
+neighbours; coarse planes still distinguish far-apart patches that the fine ones
+have long since wrapped.
+
+\paragraph{What the implementation actually does: one axis per plane.}
+Equation~\eqref{eq:rope2d} is the general form, in which a plane may respond to
+both $r$ and $c$. Our implementation takes the simpler disjoint special case,
+matching DA3's \texttt{RotaryPositionEmbedding2D} so the two modules are
+interchangeable: the first $N/2$ channels encode the row only and the last $N/2$
+the column only. In the language of \eqref{eq:rope2d} that is
+\begin{equation}
+  \underbrace{\theta^{\text{col}}[n]=0}_{\text{row half}},
+  \qquad
+  \underbrace{\theta^{\text{row}}[n]=0}_{\text{column half}},
+\end{equation}
+with the surviving rate in each half given by \eqref{eq:rope2d-ladder}. Each
+half then holds $N/4$ planes, which is where the $N/4$ in
+\eqref{eq:rope2d-ladder} comes from, and why the code asserts that the feature
+width is divisible by $4$ rather than by $2$.
+
+\paragraph{Both rotaries must turn in the same planes.}
+Because plane $n$ is defined as a specific pair of channels, 2-D RoPE and the
+complex-SSM rotary of \S\ref{sec:rope} have to pair channels the same way. They
+did not, once: 2-D RoPE paired channel $k$ with $k+N/4$ while the kernel paired
+adjacent channels. Each was self-consistent on its own, so single-encoding runs
+looked healthy, but with both enabled every channel was spun about two different
+axes, which do not compose into one angle, and absolute position leaked into the
+score. Measured as departure from Toeplitz structure on constant content:
+$1.3\times10^{-2}$ mismatched against $2.2\times10^{-7}$ matched, and it cost the
+two-directional operator $12$ points of CIFAR-10 accuracy at $T{=}65$. The
+project therefore routes every rotary through one \texttt{rotate\_pairs}
+function. The resulting
 $\widetilde{\bm{C}}_i = \bm{R}_{\le i}\bm{C}_i$ and
 $\widetilde{\bm{B}}_j$ now carry a 2-D rotary position encoding
 inside the SSD inner product \eqref{eq:self-rope}.
@@ -1103,6 +1186,70 @@ scalar that cannot express any $|i-j|$ dependence, leaving RoPE as its
 \emph{only} source of relative position. Omitting RoPE therefore does not
 penalise the two operators equally, and a comparison run without it understates
 VSSD-$\gamma$ specifically (\S\ref{sec:ncssd-when}).
+
+\subsection{Positional encoding in the CIFAR-10 study}\label{sec:pos-cifar}
+
+The ablation of \S\ref{sec:ablation} crosses every operator with every
+positional encoding, so it is worth stating exactly what is switched on in each
+cell, and what is present in \emph{all} of them.
+
+\paragraph{Always on, in every row: a learnable absolute embedding.}
+The backbone is a ViT-Tiny at $d{=}192$, depth $6$, $3$ heads, and it adds a
+learnable per-position embedding to the token stream immediately after
+patchification, exactly as a standard ViT does. That embedding is never ablated.
+The ``Enc.'' column therefore does not mean ``the network knows where its tokens
+are'' versus ``it does not'' --- it means which encoding is supplied
+\emph{to the mixer's own $\bm{B}$ and $\bm{C}$ projections}, on top of an
+absolute embedding that is always there. Reading a ``---'' row as position-blind
+would overstate what the ablation shows.
+
+\paragraph{The two mixer-level encodings.}
+Both act by rotating $\bm{B}_j$ and $\bm{C}_i$, and they differ in what sets the
+angle:
+\begin{itemize}
+  \item \emph{2-D RoPE} (\S\ref{sec:2drope}): the angle is the token's grid
+        position, $(r,c)$, through \eqref{eq:rope2d}. Purely positional,
+        parameter-free, applied outside the operator.
+  \item \emph{rotary} (\S\ref{sec:rope}): Mamba-3's own complex-SSM rotation,
+        whose angle is a \emph{learned function of the token's content} and is
+        accumulated along the scan. It is positional only to the extent that the
+        cumulative sum grows with index, which is why \S\ref{sec:rope} declines
+        to call it RoPE.
+  \item \emph{1-turn rotary} (\S\ref{sec:rope-turns}): the same rotation with
+        its total angular spread pinned to one turn, $\theta_j = 2\pi j/T$,
+        which is what repairs the long-sequence collapse.
+\end{itemize}
+The two are independent and compose, which is why the table has cells for each
+alone and for both together.
+
+\paragraph{Grid coordinates, and where the CLS token goes.}
+Patch coordinates run $1,\dots,g$ on a $g\times g$ grid, deliberately not from
+$0$: the CLS token has no place on the grid, so it is given $(0,0)$, and starting
+the patches at $1$ keeps that from colliding with the top-left patch. The two
+sequence lengths in the study are
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+patch size & grid $g\times g$ & patches & $T$ (with CLS) \\
+\midrule
+$4$ & $8\times8$   & $64$   & $65$ \\
+$1$ & $32\times32$ & $1024$ & $1025$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+so $T{=}1025$ is the same $32\times32$ image read one pixel per token. The
+rotary's angular spread is what changes drastically between these two, and
+\S\ref{sec:rope-turns} is the reason the $T{=}1025$ rotary cells collapse
+while the $T{=}65$ ones do not: at $T{=}65$ the accumulated angle spans a few
+turns, at $T{=}1025$ it spans of order a hundred.
+
+\paragraph{Concrete numbers for 2-D RoPE here.}
+The rotation is applied to $\bm{B}$ and $\bm{C}$, which have the state width
+$N=64$ per head. Half of those channels encode the row and half the column, so
+each axis gets $N/4=16$ rotation planes, with rates from \eqref{eq:rope2d-ladder}
+at base $100$: $1.0$ radian per patch on the finest plane down to $0.013$ on the
+coarsest. Note that this is $N$, the state width, and not the model width $d$ ---
+RoPE here rotates the SSD's key/query projections, not the residual stream.
 
 \subsection{Bidirectional scan (forward \texorpdfstring{$+$}{+} reverse)}
 \label{sec:bidi}
@@ -1260,6 +1407,92 @@ The price is uniformity: every query reads the same global summary
 $\bm{H}$, so the per-pair relative weight that $\bm{L}_{ij}$ encodes
 in SSD is gone. \cite{vssd} argues this is a correct trade for
 images, where no $1$-D distance is meaningful anyway.
+
+\subsubsection{Why a per-token vector cannot encode a distance bias}
+\label{sec:no-distance-bias}
+
+The sentence above says the per-pair weight ``is gone''. It is worth seeing
+concretely \emph{why} no choice of $\bm{m}$ can bring back a weight that
+depends on the distance $|i-j|$, because the reason is elementary and it is
+what forces the two-pool construction of \S\ref{sec:two-pools}.
+
+\paragraph{First: every row of the mask is the same.}
+Write out the positional weight that each operator gives to key $j$ when read
+by query $i$, for a length-$4$ sequence and a constant decay
+$\alpha_k\equiv\tfrac12$. Causal SSD (Mamba-2 form, $\gamma$-band only) gives
+$\bm{L}_{ij}=\alpha^{\,i-j}$ on the lower triangle:
+\begin{equation*}
+  \bm{L}^{\text{causal}} =
+  \begin{array}{c|cccc}
+     & j{=}1 & j{=}2 & j{=}3 & j{=}4 \\ \hline
+    i{=}1 & 1     & 0     & 0    & 0 \\
+    i{=}2 & 1/2   & 1     & 0    & 0 \\
+    i{=}3 & 1/4   & 1/2   & 1    & 0 \\
+    i{=}4 & 1/8   & 1/4   & 1/2  & 1
+  \end{array}
+\end{equation*}
+Summing a forward and a backward pass (\S\ref{sec:bidi}) fills the other
+triangle and gives $\bigl(\tfrac12\bigr)^{|i-j|}$, a genuine distance decay:
+\begin{equation*}
+  \bm{L}^{\text{bi}} =
+  \begin{array}{c|cccc}
+     & j{=}1 & j{=}2 & j{=}3 & j{=}4 \\ \hline
+    i{=}1 & 1    & 1/2  & 1/4  & 1/8 \\
+    i{=}2 & 1/2  & 1    & 1/2  & 1/4 \\
+    i{=}3 & 1/4  & 1/2  & 1    & 1/2 \\
+    i{=}4 & 1/8  & 1/4  & 1/2  & 1
+  \end{array}
+\end{equation*}
+VSSD-$\gamma$'s weight is $m_j$, which carries no $i$ at all, so the same
+table reads
+\begin{equation*}
+  \bm{L}^{\text{VSSD-}\gamma} =
+  \begin{array}{c|cccc}
+     & j{=}1 & j{=}2 & j{=}3 & j{=}4 \\ \hline
+    i{=}1 & m_1 & m_2 & m_3 & m_4 \\
+    i{=}2 & m_1 & m_2 & m_3 & m_4 \\
+    i{=}3 & m_1 & m_2 & m_3 & m_4 \\
+    i{=}4 & m_1 & m_2 & m_3 & m_4
+  \end{array}
+\end{equation*}
+\emph{Every row is identical.} Token $1$ and token $4$ both weight key $1$ by
+$m_1$, although key $1$ is the immediate neighbour of one and three steps away
+from the other. A weight that is the same for every query cannot depend on how
+far that query is from the key. That is the entire argument; nothing about
+$1/A_j$ in particular matters.
+
+\paragraph{Second: no cleverer per-token choice helps either.}
+One might hope to recover distance by letting the query side contribute a
+number too --- the most general weight that still factorises, and therefore the
+most general one that keeps the $O(TND)$ cost, is
+$\bm{L}_{ij}=f_i\,g_j$ with one number per query and one per key. Ask it for
+$\bigl(\tfrac12\bigr)^{|i-j|}$ and read off three of its entries:
+\begin{align*}
+  i=j:\quad & f_i\,g_i = \bigl(\tfrac12\bigr)^0 = 1
+              &&\Longrightarrow\quad g_i = 1/f_i, \\
+  (i,j)=(1,2):\quad & f_1\,g_2 = f_1/f_2 = \tfrac12, \\
+  (i,j)=(2,1):\quad & f_2\,g_1 = f_2/f_1 = \tfrac12 .
+\end{align*}
+The last two must hold at once, because $(1,2)$ and $(2,1)$ are the same
+distance apart. Multiplying them gives
+\begin{equation*}
+  \frac{f_1}{f_2}\cdot\frac{f_2}{f_1} \;=\; 1
+  \qquad\text{but also}\qquad
+  \tfrac12\cdot\tfrac12 \;=\; \tfrac14,
+\end{equation*}
+so $1=\tfrac14$. There is no such $f$. The obstruction is that a factorised
+weight is a \emph{ratio} $f_i/f_j$, which turns upside down when the two
+indices are swapped, whereas a distance does not change --- and the diagonal
+pins the constant, leaving no freedom to absorb the difference.
+
+\paragraph{Why the other constructions escape it.}
+The causal mask escapes because it only ever fills the lower triangle: it is
+never asked for both $(1,2)$ and $(2,1)$, so the contradiction above cannot be
+posed. The bidirectional scan escapes because it does not use one factorised
+mask --- it \emph{adds two} of them, one per scan direction, and a sum of two
+ratios is not a ratio. This is also exactly why \S\ref{sec:two-pools}
+needs a second pool rather than a cleverer single vector: a second additive
+term is the cheapest thing that is not a ratio.
 
 \paragraph{Practical note on parameterization.} \cite{vssd}~\S 3.2
 remarks that since $A_t$ and $1/A_t$ span the same range of values up
@@ -1461,6 +1694,7 @@ but not inevitable --- adding $\beta_{j+1}$ on top of that same
 $1/A_j$ recovers the $\beta$-band's causal content at zero extra cost.
 
 \subsubsection{Why the bidirectional collapse needs two pools, not one}
+\label{sec:two-pools}
 
 The free lunch ends at \S\ref{sec:bidi}'s reverse pass. Reversing the
 sequence and re-applying \eqref{eq:rec3} is not merely relabeling
@@ -3265,6 +3499,104 @@ updated operator (2-D RoPE, fused Triton kernel, pinned upstream submodule)
 rather than the 2026-04 snapshot that produced the legacy numbers above.
 
 %% ================================================================
+\section{Note: bilinear flow chaining for 2-D tracks}\label{sec:flow-chaining}
+
+This section is a scope exception. Everything above concerns the Mamba-3 operator
+itself; the note below concerns the 2-D front-end of the point tracker that the
+operator's refiner sits behind. It is recorded here because the mechanism is
+short, easy to state imprecisely, and referenced from the manuscript's method
+section, which compresses it to a single clause.
+
+\subsection{What a flow field stores}
+
+Dense optical flow between two consecutive frames is a \emph{two-channel raster}:
+the same width and height as the image, but holding two numbers per pixel rather
+than a colour. At integer pixel $(u,v)$ it stores a displacement
+\begin{equation}\label{eq:flow-field}
+  \bm{F}(u,v) \;=\; \bigl(\Delta x,\ \Delta y\bigr),
+\end{equation}
+meaning ``the scene content at pixel $(u,v)$ in this frame appears at
+$(u+\Delta x,\ v+\Delta y)$ in the next one''. Two points are worth being explicit
+about, because both are easy to get wrong:
+\begin{itemize}
+  \item $\Delta x$ and $\Delta y$ are \emph{real-valued}. Flow estimators such as
+        SEA-RAFT and WAFT regress sub-pixel displacements; nothing constrains a
+        displacement to a whole number of pixels.
+  \item The quantity interpolated below is these two displacement numbers, not
+        colour. A flow field is often \emph{visualised} as a colour image, hue for
+        direction and saturation for magnitude, but that colour is a rendering of
+        \eqref{eq:flow-field}. The chaining never touches it.
+\end{itemize}
+
+\subsection{Why interpolation is unavoidable}
+
+A track begins at its query pixel, which is an integer location, so its first
+lookup needs no interpolation. After one hop, however, the point sits at
+$(x+\Delta x,\ y+\Delta y)$ with real-valued $\Delta$, so it is no longer on the
+pixel grid --- and \eqref{eq:flow-field} is defined only \emph{on} the grid. Every
+subsequent hop therefore has to read the flow field at a position where nothing is
+stored. Bilinear sampling is how that read is defined.
+
+The alternative --- rounding the position to the nearest pixel at each hop, so
+every lookup is exact --- is what we specifically avoid. Each rounding introduces
+an error of up to half a pixel, and a track spans hundreds of frames, so the
+errors accumulate into a drift that has nothing to do with the flow's own
+accuracy.
+
+\subsection{The interpolation, with numbers}
+
+Treat each of the two displacement channels as a scalar image and interpolate it
+in the ordinary bilinear way. Let the point be at $(x,y)$, write
+$u_0=\lfloor x\rfloor$, $v_0=\lfloor y\rfloor$ for the pixel up and to the left,
+and let
+\begin{equation}
+  a \;=\; x-u_0, \qquad b \;=\; y-v_0
+\end{equation}
+be the fractional parts. The four surrounding stored displacements are
+$\bm{F}_{00}=\bm{F}(u_0,v_0)$, $\bm{F}_{10}=\bm{F}(u_0{+}1,v_0)$,
+$\bm{F}_{01}=\bm{F}(u_0,v_0{+}1)$ and $\bm{F}_{11}=\bm{F}(u_0{+}1,v_0{+}1)$, and
+the sampled displacement is their weighted average
+\begin{equation}\label{eq:bilinear}
+  \bm{F}(x,y) \;=\;
+    (1{-}a)(1{-}b)\,\bm{F}_{00} \;+\; a(1{-}b)\,\bm{F}_{10}
+    \;+\; (1{-}a)b\,\bm{F}_{01} \;+\; ab\,\bm{F}_{11},
+\end{equation}
+each weight being the area of the rectangle \emph{diagonally opposite} that
+corner, so the four weights are non-negative and sum to $1$. A corner nearer the
+point gets more weight.
+
+Concretely, for a point at $(12.3,\,45.7)$ we have $a=0.3$, $b=0.7$, so
+\eqref{eq:bilinear} weights the four pixels
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+pixel & weight & \\
+\midrule
+$(12,45)$ & $(1{-}0.3)(1{-}0.7) = 0.21$ & up-left \\
+$(13,45)$ & $0.3\,(1{-}0.7) = 0.09$     & up-right \\
+$(12,46)$ & $(1{-}0.3)\,0.7 = 0.49$     & down-left \\
+$(13,46)$ & $0.3\times0.7 = 0.21$       & down-right \\
+\bottomrule
+\end{tabular}
+\end{center}
+and the largest weight goes to $(12,46)$, the corner the point is closest to
+($0.3$ to its right, $0.3$ above it). If the blend comes out as
+$\bm{F}=(2.4,-1.1)$ then the point's next position is
+\begin{equation*}
+  (12.3+2.4,\ 45.7-1.1) \;=\; (14.7,\ 44.6),
+\end{equation*}
+fractional again, so the following hop interpolates in exactly the same way. The
+position is carried forward at full precision for the whole track.
+
+\subsection{Visibility by round trip}
+
+The same sampler gives the occlusion test for free. Propagate a point forward one
+frame with the forward field, then propagate the result back with the backward
+field: with trustworthy flow it should land close to where it started. A large
+round-trip error means the flow at that location cannot be trusted, which is
+exactly the situation under occlusion, where the one-to-one pixel correspondence
+that flow assumes does not exist. A point failing the test is marked occluded.
+
 \section{Conclusion}
 %% ================================================================
 

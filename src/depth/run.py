@@ -65,13 +65,17 @@ def feature_loss(student_feats: list[Tensor], teacher_feats: list[Tensor]) -> Te
     L2 is divided by channel count so the two terms stay comparable as width changes;
     cosine is what actually carries direction, and L2 alone lets the student match
     magnitude while pointing elsewhere.
+
+    Averaged over layers, not summed: summing four layers scales the gradient by four at
+    the same learning rate, which is a 4x larger effective step than the reference recipe
+    took and is not what its lr 3e-4 was tuned for.
     """
     loss = torch.zeros((), device=student_feats[0].device)
     for fs, ft in zip(flatten_views(student_feats), flatten_views(teacher_feats)):
         s, t = fs.float(), ft.float().detach()
         loss = loss + (s - t).pow(2).mean() / max(s.shape[-1], 1)
         loss = loss + (1.0 - (F.normalize(s, dim=-1) * F.normalize(t, dim=-1)).sum(-1).mean())
-    return loss
+    return loss / max(len(student_feats), 1)
 
 
 def silog_loss(pred: Tensor, gt: Tensor, valid: Tensor, lam: float = 0.85) -> Tensor:
@@ -90,6 +94,34 @@ def silog_loss(pred: Tensor, gt: Tensor, valid: Tensor, lam: float = 0.85) -> Te
         total = total + (d.pow(2).mean() - lam * d.mean().pow(2)).clamp_min(0).sqrt()
         n += 1
     return total / max(n, 1)
+
+
+def edge_aware_smoothness(depth: Tensor, image: Tensor) -> Tensor:
+    """Penalise depth gradients where the image is smooth. ``depth`` (N,H,W), ``image`` (N,3,H,W).
+
+    Ported from the reference recipe, which trained on SILog + 0.1 * this term. SILog is
+    scale-invariant and per-pixel, so on its own it never asks neighbouring pixels to agree;
+    this term supplies that, weighted down where the image itself has an edge.
+    """
+    assert image.shape[-3] == 3 and image.shape[:-3] == depth.shape[:-2], (
+        f"expected depth (N,H,W) and image (N,3,H,W); got {tuple(depth.shape)} and "
+        f"{tuple(image.shape)}. Broadcasting will silently accept a collapsed image here."
+    )
+    d = depth.unsqueeze(1)
+    d = d / d.mean(dim=(-1, -2), keepdim=True).clamp_min(1e-6)
+    dx = (d[..., :, 1:] - d[..., :, :-1]).abs()
+    dy = (d[..., 1:, :] - d[..., :-1, :]).abs()
+    ix = (image[..., :, 1:] - image[..., :, :-1]).abs().mean(dim=-3, keepdim=True)
+    iy = (image[..., 1:, :] - image[..., :-1, :]).abs().mean(dim=-3, keepdim=True)
+    return (dx * torch.exp(-ix)).mean() + (dy * torch.exp(-iy)).mean()
+
+
+def _init_backbone(student: DepthStudent, da3_model) -> None:
+    """Seed the student's non-attention backbone from DA3. See DepthStudent.init_from_da3."""
+    st = student.init_from_da3(da3_model)
+    print(f"[weights] loaded {st['loaded']}/{st['total']} tensors  "
+          f"(skipped_attn={st['skipped_attn']}, shape_mismatch={st['shape_mismatch']}, "
+          f"missing_in_src={st['missing_in_src']})", flush=True)
 
 
 def _student(mixer: str, img_size: int, device: str, chunk_size: int | None = None) -> DepthStudent:
@@ -119,6 +151,7 @@ def cmd_distill(a) -> None:
     _survive_cudnn_mismatch()
     student = _student(a.mixer, a.img_size, dev, a.chunk_size)
     teacher = load_da3(a.teacher, device=dev)
+    _init_backbone(student, teacher)
     params = student.trainable("mixer")
     opt = torch.optim.AdamW(params, lr=a.lr_mixer, weight_decay=0.05)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.steps)
@@ -148,6 +181,7 @@ def cmd_finetune(a) -> None:
     _survive_cudnn_mismatch()
     student = _student(a.mixer, a.img_size, dev, a.chunk_size)
     da3 = load_da3(a.teacher, device=dev)
+    _init_backbone(student, da3)
     head = dualdpt(da3)
     if a.init:
         _load_into(Path(a.init), student, head)
@@ -171,13 +205,16 @@ def cmd_finetune(a) -> None:
         imgs, gt, valid = sc.images.to(dev), sc.depth.to(dev), sc.valid.to(dev)
         with torch.autocast(device_type=dev, dtype=torch.bfloat16, enabled=dev == "cuda"):
             pred = dualdpt_depth(head, student.bridged(imgs), a.img_size, a.img_size)
-            loss = silog_loss(pred.float(), gt, valid)
+            l_silog = silog_loss(pred.float(), gt, valid)
+            l_edge = edge_aware_smoothness(pred.float(), imgs)
+            loss = l_silog + a.lambda_edge * l_edge
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
         sched.step()
         if step % a.log_every == 0 or step == a.steps - 1:
-            print(f"[finetune] step {step:6d}/{a.steps}  silog={loss.item():.4f}  "
+            print(f"[finetune] step {step:6d}/{a.steps}  silog={l_silog.item():.4f}  "
+                  f"edge={l_edge.item():.4f}  "
                   f"lr={opt.param_groups[0]['lr']:.2e}  [{sc.name}]", flush=True)
     _save(Path(a.out) / "ckpt.pt", student, head,
           {"phase": "finetune", "mixer": a.mixer, "steps": a.steps, "unfreeze_head": a.unfreeze_head})
@@ -190,6 +227,7 @@ def cmd_eval(a) -> None:
     _survive_cudnn_mismatch()
     student = _student(a.mixer, a.img_size, dev, a.chunk_size)
     da3 = load_da3(a.teacher, device=dev)
+    _init_backbone(student, da3)
     head = dualdpt(da3)
     if a.ckpt:
         _load_into(Path(a.ckpt), student, head)
@@ -242,6 +280,8 @@ def main() -> None:
     f.add_argument("--lr-head", type=float, default=1e-5)
     f.add_argument("--unfreeze-head", action="store_true")
     f.add_argument("--augment", action="store_true")
+    f.add_argument("--lambda-edge", type=float, default=0.1,
+                   help="Weight on edge-aware smoothness; 0.1 is the reference value, 0 disables.")
     f.add_argument("--out", type=Path, required=True)
     f.set_defaults(fn=cmd_finetune)
 

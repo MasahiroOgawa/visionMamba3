@@ -7,7 +7,10 @@
 # from that run's own logs rather than from prose:
 #   Phase B  distil 20000 steps against DA3-SMALL's features, lr 3e-4
 #   Phase C  500 steps, lr_mixer 1e-4 / lr_bridge 3e-4, head frozen, no augmentation
-#   Phase C  1000 steps, head unfrozen at 1e-5, augmentation on
+#   Phase C  1000 steps, head unfrozen at 1e-5
+# No augmentation: the reference cfg has no augment field, so it trained without one.
+# The depth loss is SILog + 0.1 * edge-aware smoothness (--lambda-edge, default 0.1), which
+# is the reference objective; SILog alone leaves the depth map locally incoherent.
 # The second Phase C starts from the first rather than replacing it: it begins from an
 # already-adapted bridge, so one longer run is not the same experiment.
 #
@@ -37,7 +40,7 @@ $RUN finetune --mixer "$MIXER" --init "$OUT/distill/ckpt.pt" --steps 500 --n-vie
 
 echo "=== [$MIXER] Phase C 1000, head trained ($(date -Is)) ==="
 $RUN finetune --mixer "$MIXER" --init "$OUT/ft500/ckpt.pt" --steps 1000 --n-views "$NV" \
-     --lr-mixer 1e-5 --lr-bridge 3e-5 --lr-head 1e-5 --unfreeze-head --augment \
+     --lr-mixer 1e-5 --lr-bridge 3e-5 --lr-head 1e-5 --unfreeze-head \
      --out "$OUT/ft1000" 2>&1 | grep -vE "^\[INFO|Warning:" \
   || { echo "[$MIXER] Phase C(1000) FAILED"; exit 1; }
 

@@ -132,6 +132,32 @@ class DepthStudent(nn.Module):
         self.embed_dim = self.vit.embed_dim
         self.bridges = nn.ModuleList(DimBridge(self.embed_dim) for _ in self.export_layers)
 
+    def init_from_da3(self, da3_model) -> dict:
+        """Copy DA3's pretrained backbone weights in, skipping the attention it replaces.
+
+        This is not optional. Only the mixer is trained in Phase B and only mixer+bridge in
+        Phase C, so whatever is not copied here stays at its random initialisation for the
+        whole run -- patch embedding, every MLP, every LayerNorm. A mixer can still drive the
+        distillation loss down against a random patch embedding by compensating for it, which
+        is why omitting this shows up as a generalisation gap on a held-out scene rather than
+        as a training-loss failure.
+        """
+        src = da3_model.model.backbone.pretrained.state_dict()
+        dst = self.vit.state_dict()
+        keep, skipped_attn, mismatch, absent = {}, 0, 0, 0
+        for k, v in dst.items():
+            if ".attn." in k:
+                skipped_attn += 1
+            elif k not in src:
+                absent += 1
+            elif src[k].shape == v.shape:
+                keep[k] = src[k]
+            else:
+                mismatch += 1
+        self.vit.load_state_dict(keep, strict=False)
+        return {"loaded": len(keep), "total": len(dst), "skipped_attn": skipped_attn,
+                "shape_mismatch": mismatch, "missing_in_src": absent}
+
     @staticmethod
     def _as_multiview(images: Tensor) -> Tensor:
         """DA3's ViT is multi-view and wants (B, S, 3, H, W). Accept (B, 3, H, W) too.
