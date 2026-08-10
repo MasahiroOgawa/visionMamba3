@@ -222,6 +222,20 @@ algorithm calls for it.
 \subsection{Recurrence, parallel form, and decay factors}
 \label{sec:decay}
 
+Before any discretisation choice, a state-space model is the linear
+recurrence
+\begin{equation}\label{eq:ssm}
+  \bm{h}_t = A_t\,\bm{h}_{t-1} + \bm{B}_t\bm{x}_t,
+  \qquad
+  \bm{y}_t = \bm{C}_t^\top\bm{h}_t,
+  \qquad
+  A_t \in \mathbb{R},\quad \bm{B}_t,\bm{C}_t \in \mathbb{R}^{N},
+\end{equation}
+with the shapes of \S\ref{sec:sizes}. Everything in this subsection is a
+choice of how to turn $A_t$ and the step size $\Delta_t$ into per-step
+coefficients; the scalar $A_t$, rather than an $N\times N$ matrix, is
+what makes the duality of \S\ref{sec:ssd} hold at all.
+
 Mamba-3 uses the \emph{exponential-trapezoidal} discrete recurrence of
 \cite{mamba3} eq.~(5)–(6):
 \begin{equation}\label{eq:rec3}
