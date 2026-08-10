@@ -3120,6 +3120,91 @@ Vision Mamba-3 (CM22@1000) & 0.0531 & 0.1012 & 0.0229 & \textbf{0.9972} \\
 2-D RoPE and against an older \texttt{mamba-ssm} kernel. They are recorded here
 as the reference to reproduce, not as a current result.
 
+\subsection{The legacy result reproduces --- the difference is architectural}
+\label{sec:eth3d-legacy-repro}
+
+\emph{Working memo, 2026-08-10. Recorded here rather than in the paper until
+the follow-up experiments settle.}
+
+\paragraph{It reproduces exactly.} The archived CM22 checkpoint, re-evaluated
+with its own era's evaluator (\texttt{scripts/eval\_ssm3d\_vs\_da3.py} at
+commit \texttt{44e99c3}, checked out into a worktree):
+
+\begin{center}\small
+\begin{tabular}{lccc}
+\toprule
+ & re-measured & \S\ref{sec:eth3d-depth-legacy} record & paper Table 2 \\
+\midrule
+abs.\ rel.        & $0.0531$ & $0.0531$ & $0.053$ \\
+RMSE              & $0.1012$ & $0.1012$ & $0.101$ \\
+$\log_{10}$       & $0.0229$ & $0.0229$ & $0.023$ \\
+$\delta{<}1.25$   & $0.9972$ & $0.9972$ & $0.997$ \\
+DA3-SMALL abs.\ rel.\ & $0.0417$ & $0.0417$ & $0.042$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Nothing was wrong with the original measurement, and nothing was
+lost. Two records here were wrong, though, and are corrected:
+\S\ref{sec:eth3d-depth-legacy} gives CM22's pipeline as
+\texttt{distill\_cm12/ckpt\_20000.pt} $\rightarrow$ \texttt{depth\_ft\_cm22};
+its own training log says it initialised from
+\texttt{depth\_ft\_cm12/ckpt\_500.pt}, a Phase-\emph{C} checkpoint. And the
+checkpoints are not gone: \texttt{outputs/runs/\_archived\_old\_arch/} holds
+13\,GB of them, CM12 and CM22 included.
+
+\paragraph{What actually differs.} Not the kernel, and not the training
+budget. The two systems are different architectures:
+
+\begin{center}\small
+\begin{tabular}{lll}
+\toprule
+ & legacy (\texttt{ssm3d}, $0.0531$) & current (\texttt{mamba3\_attn}, $0.159$ best) \\
+\midrule
+backbone   & built from scratch, Mamba-3   & pretrained DA3-SMALL, \\
+           & injected via \texttt{block\_fn} & \texttt{block.attn} replaced in place \\
+weights    & DA3's copied in, all
+             \texttt{.attn.*} skipped        & everything but the mixer untouched \\
+           & ($125/282$ tensors, $80$ skipped) & by construction \\
+\texttt{cat\_token} & \textbf{False} --- one $384$-d stream & DA3's native \textbf{True} ($768$-d) \\
+feature path & \textbf{\texttt{DimBridge}} $384\!\to\!768$, & none added; DA3's own \\
+ to the head & trained in Phase-C            & path used unchanged \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The load-bearing difference is the last row. DA3's DualDPT expects
+$768$-dimensional input because \texttt{cat\_token=True} concatenates two
+$384$-d streams. The legacy student produced a single $384$-d stream and
+inserted a learnable \texttt{DimBridge} between backbone and head, initialised
+to $\mathrm{cat}([x,x])$ so it starts as a no-op and is then \emph{trained} in
+Phase-C. That gives the fine-tune a small adapter whose only job is to
+re-express Mamba-3 features in the basis the pretrained head already reads.
+
+The current architecture has no such adapter. It swaps the mixer inside a
+network whose downstream weights were fitted to softmax attention's output,
+and asks Phase-C to absorb the mismatch by fine-tuning the whole network on
+$374$ images. That is a far harder problem than fitting one linear map, and
+the gap --- $0.053$ against $0.159$ --- is the size of it.
+
+\paragraph{The kernel hypothesis was wrong.} Worth recording since it cost a
+day. \texttt{third\_party/mamba-ssm} was added as a submodule on 2026-04-26;
+CM22 is dated 2026-04-23, so the legacy number predates the Triton kernel
+entirely, and the commit that added it recorded ``kernel transforms
+efficiency, lifts accuracy''. That made ``run the previous kernel'' look like
+the experiment. It is not runnable: the reference path OOMs on an $11.6$\,GB
+GPU at $504^2$ with four views, at every chunk size from $128$ down to $16$
+(allocated stays near $10.7$\,GB --- it is stored activations across sixteen
+layers, not the mask blocks), and fits only at one view, which removes the
+multi-view signal the pipeline exists to use.
+
+\paragraph{Next.} The legacy architecture is the one that works, so the
+follow-up is to put our operators inside it rather than to keep tuning the
+current one: port \texttt{cat\_token=False} $+$ \texttt{DimBridge} into
+\texttt{mamba3\_attn} as a build option, then run VSSD-$\beta,\gamma$ and
+VSSD-$\gamma$ through it against the bidirectional $0.0531$, and against
+DA3-SMALL's $0.0417$.
+
 \subsection{What this repository provides}
 \label{sec:eth3d-depth-harness}
 
