@@ -18,6 +18,12 @@ eval = [
     "pyyaml>=6.0.3",
     "torchvision>=0.27.1",
 ]
+depth = [
+    "addict>=2.4.0",
+    "omegaconf>=2.3.1",
+    "safetensors>=0.8.0",
+    "timm>=1.0.28",
+]
 
 [build-system]
 requires = ["hatchling"]

@@ -2,3 +2,7 @@
 	path = third_party/mamba-ssm
 	url = https://github.com/state-spaces/mamba.git
 	branch = main
+[submodule "third_party/depth-anything-3"]
+	path = third_party/depth-anything-3
+	url = https://github.com/ByteDance-Seed/Depth-Anything-3
+	branch = main
