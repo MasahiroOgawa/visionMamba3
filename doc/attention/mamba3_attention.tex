@@ -131,7 +131,7 @@ We summarize the symbols used throughout. The names match
   \item $\Delta_t \in \mathbb{R}_{>0}$ is a data-dependent step size.
   \item $A_t \in \mathbb{R}_{<0}$ is a data-dependent (in Mamba-3) or
         data-independent (in Mamba-2) scalar that governs decay.
-  \item $\bm{h}_t \in \mathbb{R}^{N}$ is the hidden state at time $t$
+  \item $\bm{h}_t \in \mathbb{R}^{N\times D}$ is the hidden state at time $t$
         (SISO; see \S\ref{sec:mimo} for MIMO).
   \item $\bm{Y} \in \mathbb{R}^{T\times D}$ is the output sequence.
 \end{itemize}
@@ -225,12 +225,19 @@ algorithm calls for it.
 Before any discretisation choice, a state-space model is the linear
 recurrence
 \begin{equation}\label{eq:ssm}
-  \bm{h}_t = A_t\,\bm{h}_{t-1} + \bm{B}_t\bm{x}_t,
+  \bm{h}_t = A_t\,\bm{h}_{t-1} + \bm{B}_t\bm{x}_t^\top,
   \qquad
-  \bm{y}_t = \bm{C}_t^\top\bm{h}_t,
+  \bm{y}_t = \bm{h}_t^\top\bm{C}_t,
 \end{equation}
 where $A_t \in \mathbb{R}$ and $\bm{B}_t,\bm{C}_t \in \mathbb{R}^{N}$, as
-listed in \S\ref{sec:sizes}. Everything in this subsection is a
+listed in \S\ref{sec:sizes}. Note the shapes: $\bm{B}_t\bm{x}_t^\top$ is an
+\emph{outer} product $\mathbb{R}^{N}\times\mathbb{R}^{D}\to\mathbb{R}^{N\times D}$,
+so the state is a matrix --- each of the $D$ channels carries its own
+$N$-dimensional state, decayed by the same scalar $A_t$ --- and the
+read-out $\bm{h}_t^\top\bm{C}_t$ returns a $D$-vector. Below we write
+$\bm{B}_j\bm{x}_j$ for this outer product throughout, which is what makes
+$\bm{C}_t^\top\bm{B}_j$ a scalar multiplying $\bm{x}_j$ in
+\S\ref{sec:state-to-output}. Everything in this subsection is a
 choice of how to turn $A_t$ and the step size $\Delta_t$ into per-step
 coefficients; the scalar $A_t$, rather than an $N\times N$ matrix, is
 what makes the duality of \S\ref{sec:ssd} hold at all.
@@ -388,6 +395,7 @@ The last equality uses the empty-product convention for $j=t$. This
 proves \eqref{eq:un-claim}.
 
 \subsection{From state to output}
+\label{sec:state-to-output}
 
 Plug \eqref{eq:un-claim} into the output equation
 $\bm{y}_t = \bm{C}_t^\top\bm{h}_t$:
