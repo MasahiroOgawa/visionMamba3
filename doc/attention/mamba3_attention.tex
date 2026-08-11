@@ -3631,6 +3631,13 @@ arms do not separate them. What is established is narrower than it first appears
 stage \emph{as configured} does not help, and the $1500$-step checkpoints remain the best.
 The separating experiment is the same extension at a markedly lower rate with no restart.
 
+\emph{It also predates the kernel fix.} All three arms were extended from checkpoints trained
+before \texttt{DepthStudent} defaulted to the reference path, so the bidirectional row above comes
+from weights fitted to the fused kernel. Whether extending Phase C still gains nothing once that
+arm is retrained is therefore untested. This is why the result is recorded here rather than in the
+manuscript: as a statement about the protocol it is sound for the two VSSD arms, which never touch
+the kernel, but it is not yet established for the operator the manuscript leads with.
+
 The intermediate scoring is what made this safe. Held-out depth error is not monotone in the
 training loss, and without \texttt{--ckpt-every} all three arms would have ended holding a
 checkpoint worse than the one they started from, with \texttt{ckpt.pt} silently replacing the
