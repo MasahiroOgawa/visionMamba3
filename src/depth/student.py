@@ -57,7 +57,8 @@ class _MixerBlock(nn.Module):
     def __init__(self, dim: int, num_heads: int = 6, *, mixer: str = "vssd_bg",
                  state_dim: int = 64, chunk_size: Optional[int] = None,
                  rope: Optional[nn.Module] = None,
-                 proj_bias: bool = True, **_ignored) -> None:
+                 proj_bias: bool = True, use_fused_kernel: bool = False,
+                 **_ignored) -> None:
         super().__init__()
         common = dict(dim=dim, num_heads=num_heads, state_dim=state_dim,
                       rope=rope, out_proj=True, proj_bias=proj_bias)
@@ -66,7 +67,8 @@ class _MixerBlock(nn.Module):
             # At 504px T is 1296 and the full T x T mask is an order of magnitude slower.
             # The collapse variants have no T x T mask and ignore it.
             self.inner = Mamba3SelfAttention(bidirectional=True, three_term=True,
-                                             chunk_size=chunk_size, **common)
+                                             chunk_size=chunk_size,
+                                             use_fused_kernel=use_fused_kernel, **common)
         elif mixer == "vssd":
             self.inner = Mamba3VSSDAttention(**common)
         elif mixer == "vssd_bg":
@@ -115,14 +117,23 @@ class DepthStudent(nn.Module):
 
     def __init__(self, *, mixer: str = "vssd_bg", img_size: int = 504,
                  patch_size: int = 14, state_dim: int = 64, chunk_size: Optional[int] = 128,
-                 export_layers: tuple[int, ...] = (5, 7, 9, 11)) -> None:
+                 export_layers: tuple[int, ...] = (5, 7, 9, 11),
+                 use_fused_kernel: bool = False) -> None:
         super().__init__()
         self.mixer = mixer
         self.img_size = img_size
         self.export_layers = tuple(export_layers)
 
+        # use_fused_kernel defaults to FALSE here, unlike the operator's own default.
+        # The Triton kernel and the reference PyTorch path are not numerically equivalent:
+        # on identical weights and input they differ by max 2.5 in absolute value, and the
+        # reference implementation this pipeline was ported from has no fused path at all.
+        # Loading that implementation's own checkpoint and evaluating it here reproduces its
+        # reported 0.0531 only with the kernel off (0.0530); with it on the same weights give
+        # 0.1160. Until the discrepancy is resolved, the reference path is what we train and
+        # evaluate with. VSSD operators ignore this flag -- they never use the kernel.
         attn_class = partial(_MixerBlock, mixer=mixer, state_dim=state_dim,
-                             chunk_size=chunk_size)
+                             chunk_size=chunk_size, use_fused_kernel=use_fused_kernel)
         self.vit = vit_small(
             img_size=img_size,
             patch_size=patch_size,

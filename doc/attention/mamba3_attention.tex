@@ -3550,20 +3550,93 @@ $T{=}1025$ (\S\ref{sec:ablation}), where the second pool gained $3.0$ points. Tw
 pointing the same way is mild support for the two-pool derivation of \S\ref{sec:two-pools} and
 nothing stronger.
 
-\paragraph{The fix helped, and does not explain the shortfall.} Seeding the backbone moved the
-bidirectional arm from $0.0836$ to $0.0695$, a $17\%$ relative improvement, and the bug was
-unambiguously real. It was nevertheless predicted to recover more than it did: the retired
-pipeline sat at $1.27\times$ its own DA3 baseline ($0.0531$ against $0.0417$), so the equivalent
-target here was about $0.041$. All three arms instead sit at $2.0$--$2.3\times$ the
-$0.0323$ baseline. Something beyond the missing weights remains unaccounted for, and this note
-does not claim to know what it is.
+\paragraph{The weight fix helped but was not the whole story.} Seeding the backbone moved the
+bidirectional arm from $0.0836$ to $0.0695$, a $17\%$ relative improvement, and that bug was
+unambiguously real. It nevertheless recovered less than predicted: the retired pipeline sat at
+$1.27\times$ its own DA3 baseline, so the equivalent target here was about $0.041$, and all three
+arms sat at $2.0$--$2.3\times$ the $0.0323$ baseline instead. The remainder is now accounted for.
 
-\paragraph{In flight.} Phase C is being extended by $9000$ steps for all three arms, continuing
-from their $1000$-step checkpoints so the final stage totals $10\,000$, with intermediate
-checkpoints scored at $3000$, $6000$, $9000$ and $10\,000$. The intermediate scoring is
-deliberate: held-out depth error is not monotone in the training loss, and an earlier long run
-in this project degraded while its loss kept falling, so the best step has to be identifiable
-after the fact rather than assumed to be the last one.
+\paragraph{The rest was the fused Triton kernel.} Loading the retired implementation's own CM22
+checkpoint into this pipeline and scoring it settles it:
+\begin{center}\small
+\begin{tabular}{lcc}
+\toprule
+weights & fused kernel & reference path \\
+\midrule
+retired implementation's own (CM22) & $0.1160$ & $\mathbf{0.0530}$ \\
+ours, bidirectional                 & $0.0695$ & $0.0681$ \\
+ours, VSSD-$\beta,\gamma$           & $0.0663$ & $0.0663$ \\
+ours, VSSD-$\gamma$                 & $0.0738$ & $0.0738$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent The retired implementation reported $0.0531$; its own weights reproduce that here to
+$0.0001$ --- but only with the kernel \emph{off}. With it on, the same weights give $0.1160$. The
+two paths are not numerically equivalent: on identical weights and one random input the mixer
+outputs differ by $\max|\Delta| = 2.53$, which is far too large to be precision noise, and with
+\texttt{use\_fused\_kernel=False} they agree \emph{exactly} ($0$). The retired implementation has
+no fused path at all.
+
+Everything else was eliminated first, each by measurement: the loader (our predictions score
+$0.0695$ on ours and $0.0694$ on theirs), the metric (ratio $1.000$ on identical tensors), the
+architecture (both $22.187$\,M total, $7.193$\,M mixer over $156$ tensors, same parameter names,
+same $1.183$\,M bridge and $3.874$\,M head), the teacher-feature route (the same
+\texttt{get\_intermediate\_layers} call), the patch and positional embedding (identical to $0$),
+\texttt{patch\_start\_idx}, one-tuple wrapping, multi-view versus per-image inference, and
+\texttt{ref\_view\_strategy}. The divergence is inside the blocks and nowhere else.
+
+Two consequences. First, our own weights barely move when the kernel is switched off
+($0.0695\to0.0681$) because they were \emph{trained} against it and adapted to it: $0.066$--$0.074$
+is what that distorted function space affords. This also explains the anomaly that our distillation
+loss was $3.4\times$ better than the reference's while our depth was worse --- the student was
+faithfully matching the teacher inside a space that does not yield good depth. Second, the VSSD
+operators are untouched: they ignore \texttt{use\_fused\_kernel} entirely (\texttt{vssd\_attention}
+deletes the argument), which is why their two columns above are bit-identical, and why only the
+bidirectional row moves. \texttt{DepthStudent} now defaults to the reference path.
+
+\emph{Unresolved, and it reaches the CIFAR-10 study.} Which implementation is \emph{correct} is not
+established here --- only that they differ. \texttt{run\_cifar} defaults \texttt{-{}-fused} to true,
+so \S\ref{sec:ablation}'s two- and four-directional rows were measured with the kernel while its
+VSSD rows were not. If the kernel is the wrong one, those scan rows are wrong.
+
+\paragraph{Extending Phase C to $10\,000$ steps gains nothing --- on any operator.} Continuing
+each arm for a further $9000$ steps from its $1000$-step checkpoint, with intermediate
+checkpoints scored rather than only the last:
+\begin{center}\small
+\begin{tabular}{lcccc}
+\toprule
+arm & $1500$ steps & $+3000$ & $+6000$ & $+9000$ \\
+\midrule
+VSSD-$\beta,\gamma$ (iv) & $\mathbf{0.0663}$ & $0.0718$ & $0.0719$ & $0.0719$ \\
+bidirectional (i)        & $\mathbf{0.0695}$ & $0.0721$ & $0.0709$ & $0.0707$ \\
+VSSD-$\gamma$ (iii)      & $\mathbf{0.0738}$ & $0.0756$ & $0.0756$ & $0.0757$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent All nine extension checkpoints are worse than their own baseline, and each arm goes
+flat after step $3000$ rather than drifting. Training loss meanwhile fell steadily --- windowed
+means for bidirectional run $0.0102, 0.0083, 0.0054, 0.0048, 0.0037, 0.0037$ over successive
+$1500$-step blocks --- so the model fitted the ten training scenes better and generalised to
+\texttt{terrains} worse. Note that per-step losses are useless here: the batch is one scene, so a
+single logged value is dominated by which scene was drawn, and only windowed means show a trend.
+
+\emph{The run cannot say why, because it changed two things at once.}
+\texttt{CosineAnnealingLR} is constructed with \texttt{T\_max=steps} and therefore \emph{restarts}:
+the extension raised the learning rate from the $\approx0$ its predecessor annealed to back up to
+$1\times10^{-5}$, and held it near there for roughly nine times as many steps as the stage it
+continued. The first window's mean, $0.0102$, is worse than where the previous stage finished,
+which is what a restart kicking the model out of its basin looks like. So the degradation is
+consistent both with overfitting and with too large an effective learning rate, and these three
+arms do not separate them. What is established is narrower than it first appears: extending this
+stage \emph{as configured} does not help, and the $1500$-step checkpoints remain the best.
+The separating experiment is the same extension at a markedly lower rate with no restart.
+
+The intermediate scoring is what made this safe. Held-out depth error is not monotone in the
+training loss, and without \texttt{--ckpt-every} all three arms would have ended holding a
+checkpoint worse than the one they started from, with \texttt{ckpt.pt} silently replacing the
+better result. Untried levers, in the order I would try them: Phase-B distillation length, and
+unfreezing more of the backbone than the mixer and bridge --- though three arms overfitting on
+$374$ images suggests the data is the limit rather than either.
 
 \paragraph{One further bug, found in review before it affected a result.} The ported
 edge-smoothness term was called as \texttt{edge\_aware\_smoothness(pred, imgs.flatten(0, 1))}.
