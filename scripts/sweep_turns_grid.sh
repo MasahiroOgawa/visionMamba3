@@ -3,7 +3,7 @@
 #
 #   bash scripts/sweep_turns_grid.sh
 #
-# Grid: n in {0.25, 0.5, 1, 2, 4} x {VSSD-gamma, VSSD-beta,gamma}, T=1025, 30 epochs, no 2-D
+# Grid: n in {0.1, 0.25, 0.5, 1, 2, 4, 10} x {VSSD-gamma, VSSD-beta,gamma}, T=1025, 30 epochs, no 2-D
 # RoPE. Three cells already exist and are skipped: VSSD-gamma at 0.5 (64.67) and 1 (58.98),
 # VSSD-beta,gamma at 1 (59.69).
 #
@@ -24,7 +24,7 @@ echo "[grid] GPU free at $(date -Is)"
 
 for VAR in vit_mamba3_vssd vit_mamba3_vssd_bg; do
   SUF=$([ "$VAR" = vit_mamba3_vssd ] && echo vssd || echo vssdbg)
-  for N in 0.25 0.5 1 2 4; do
+  for N in 0.1 0.25 0.5 1 2 4 10; do
     OUT="result/vm3_t1025_turns${N}_${SUF}"
     if [ -f "$OUT/results.json" ]; then echo "[$SUF n=$N] SKIP: already complete"; continue; fi
     rm -rf "$OUT"

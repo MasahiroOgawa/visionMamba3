@@ -154,7 +154,11 @@ def cmd_distill(a) -> None:
     _init_backbone(student, teacher)
     params = student.trainable("mixer")
     opt = torch.optim.AdamW(params, lr=a.lr_mixer, weight_decay=0.05)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.steps)
+    # eta_min is a tenth of the peak, not zero. The reference implementation anneals to
+    # `lr * 0.1` in both phases and its logs end at 3e-5 and 1e-6 accordingly; ours ended at
+    # exactly 0, so the final steps trained at no learning rate at all.
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.steps,
+                                                       eta_min=a.lr_mixer * 0.1)
     data = iter_scenes(Path(a.data_root), TRAIN_SCENES, n_views=a.n_views,
                        image_size=a.img_size, with_depth=False, seed=a.seed)
     print(f"[distill] mixer={a.mixer} trainable={sum(p.numel() for p in params)/1e6:.2f}M "
@@ -193,7 +197,8 @@ def cmd_finetune(a) -> None:
     if a.unfreeze_head:
         groups.append({"params": list(head.parameters()), "lr": a.lr_head})
     opt = torch.optim.AdamW(groups, weight_decay=0.05)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.steps)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.steps,
+                                                       eta_min=a.lr_mixer * 0.1)
 
     data = iter_scenes(Path(a.data_root), TRAIN_SCENES, n_views=a.n_views,
                        image_size=a.img_size, with_depth=True, augment=a.augment, seed=a.seed)
