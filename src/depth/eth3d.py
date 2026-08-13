@@ -148,10 +148,20 @@ def _colour_jitter(img: Tensor, rng: random.Random) -> Tensor:
 
 def load_scene(scene_dir: Path, *, max_images: int = 4, image_size: int = 504,
                with_depth: bool = True, rng: Optional[random.Random] = None,
+               sample: Optional[random.Random] = None,
                crop_scale: tuple[float, float] = (0.6, 1.0)) -> Scene:
     """Load up to ``max_images`` views, square-cropped and resized to ``image_size``.
 
     RGB and depth are cropped with the *same* box so they stay pixel-aligned.
+
+    ``sample`` decides WHICH views, and is the difference between training on a scene and
+    training on one photograph of it. Without it the first ``max_images`` paths in sorted
+    order are taken, which is what evaluation wants -- a fixed, reproducible set of views.
+    Training must pass it: at ``max_images=1`` the deterministic path returns the same single
+    image on every step, so the run sees one image per scene, ten in total, instead of the
+    374 the scenes contain. That was the case here until 2026-08-14, and it is why the
+    augmentation added on 2026-08-13 produced such a large gain -- it was the only source of
+    variety in a ten-image training set.
 
     When ``rng`` is given (Phase-C augmentation) the view additionally gets a horizontal
     flip with probability one half and photometric jitter. All three -- crop range, flip
@@ -166,9 +176,11 @@ def load_scene(scene_dir: Path, *, max_images: int = 4, image_size: int = 504,
     """
     scene_dir = Path(scene_dir)
     img_root, dep_root = _images_root(scene_dir), _depth_root(scene_dir) if with_depth else None
-    paths = sorted(img_root.rglob("*.JPG"))[:max_images]
-    if not paths:
+    all_paths = sorted(img_root.rglob("*.JPG"))
+    if not all_paths:
         raise FileNotFoundError(f"no images in {scene_dir}")
+    paths = (sorted(sample.sample(all_paths, min(max_images, len(all_paths))))
+             if sample is not None else all_paths[:max_images])
 
     imgs, deps, valids = [], [], []
     for p in paths:
@@ -240,4 +252,5 @@ def iter_scenes(data_root: Path, scenes: Sequence[str], *, n_views: int = 4,
                 Path(data_root) / "eth3d" / name,
                 max_images=n_views, image_size=image_size, with_depth=with_depth,
                 rng=rng if augment else None,
+                sample=rng,   # always: which views to draw is independent of augmentation
             )
