@@ -29,11 +29,17 @@ def median_align(pred: Tensor, gt: Tensor, valid: Tensor) -> Tensor:
     return out
 
 
-def depth_metrics(pred: Tensor, gt: Tensor, valid: Tensor, *, align: bool = True) -> dict:
+def depth_metrics(pred: Tensor, gt: Tensor, valid: Tensor, *, align: bool = True,
+                  per_image: bool = False) -> dict:
     """Per-image metrics averaged over images. All inputs (N, H, W); ``valid`` is bool.
 
     Averaging per image rather than pooling every pixel keeps one large, densely-annotated
     image from dominating the score.
+
+    ``per_image`` additionally returns each metric's per-image list under ``<name>_per_image``.
+    Two arms whose means differ by less than the spread of these lists are not separated by
+    this scene, so any claim that one operator beats another needs them. The mean keys keep
+    their names and meaning, so existing callers are unaffected.
     """
     if align:
         pred = median_align(pred, gt, valid)
@@ -51,4 +57,6 @@ def depth_metrics(pred: Tensor, gt: Tensor, valid: Tensor, *, align: bool = True
         acc["delta_1_25"].append((ratio < 1.25).double().mean().item())
     out = {k: (sum(v) / len(v) if v else float("nan")) for k, v in acc.items()}
     out["n_images"] = len(acc["abs_rel"])
+    if per_image:
+        out.update({f"{k}_per_image": v for k, v in acc.items()})
     return out
