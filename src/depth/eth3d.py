@@ -26,6 +26,7 @@ from typing import Iterator, Optional, Sequence
 import numpy as np
 import torch
 from PIL import Image
+from torch import Tensor
 
 # The split is by scene and fixed. `terrains` is the reported test set and never trains;
 # `relief_2` and `electro` drive early stopping / LR schedules and are also held out, so a
@@ -120,12 +121,38 @@ def _square_box(h: int, w: int, rng: Optional[random.Random], scale: tuple[float
     return left, top, left + s, top + s
 
 
+def _colour_jitter(img: Tensor, rng: random.Random) -> Tensor:
+    """Brightness / contrast / saturation / hue jitter on a (3, H, W) tensor in [0, 1].
+
+    Ranges are the reference implementation's; see :func:`load_scene` for why they matter.
+    RGB only -- depth must not be photometrically altered.
+    """
+    from torchvision.transforms.functional import (adjust_brightness, adjust_contrast,
+                                                   adjust_hue, adjust_saturation)
+    img = adjust_brightness(img, rng.uniform(0.6, 1.4))
+    img = adjust_contrast(img, rng.uniform(0.6, 1.4))
+    img = adjust_saturation(img, rng.uniform(0.6, 1.4))
+    img = adjust_hue(img, rng.uniform(-0.1, 0.1))
+    return img.clamp(0.0, 1.0)
+
+
 def load_scene(scene_dir: Path, *, max_images: int = 4, image_size: int = 504,
                with_depth: bool = True, rng: Optional[random.Random] = None,
-               crop_scale: tuple[float, float] = (0.7, 1.0)) -> Scene:
+               crop_scale: tuple[float, float] = (0.6, 1.0)) -> Scene:
     """Load up to ``max_images`` views, square-cropped and resized to ``image_size``.
 
     RGB and depth are cropped with the *same* box so they stay pixel-aligned.
+
+    When ``rng`` is given (Phase-C augmentation) the view additionally gets a horizontal
+    flip with probability one half and photometric jitter. All three -- crop range, flip
+    and jitter -- are the reference implementation's, which is the point: this stage is
+    what took its ETH3D result to abs_rel 0.0531, and a weaker augmentation is a different
+    experiment. Ours previously cropped only, over the narrower range (0.7, 1.0), with no
+    flip and no jitter, which is one reason our runs sat well behind that number.
+
+    The flip applies to depth and its validity mask as well as to RGB; the jitter applies
+    to RGB alone. Flipping the image without the depth would train the model against
+    mirrored ground truth.
     """
     scene_dir = Path(scene_dir)
     img_root, dep_root = _images_root(scene_dir), _depth_root(scene_dir) if with_depth else None
@@ -137,7 +164,14 @@ def load_scene(scene_dir: Path, *, max_images: int = 4, image_size: int = 504,
     for p in paths:
         rgb = np.asarray(Image.open(p).convert("RGB"))
         box = _square_box(rgb.shape[0], rgb.shape[1], rng, crop_scale)
-        imgs.append(_crop_resize(rgb, box, image_size).astype(np.float32) / 255.0)
+        # One flip decision per view, drawn before the depth branch so RGB and depth cannot
+        # disagree about it.
+        flip = rng.random() < 0.5 if rng is not None else False
+        img = _crop_resize(rgb, box, image_size).astype(np.float32) / 255.0
+        if flip:
+            img = img[:, ::-1]
+        view = torch.from_numpy(np.ascontiguousarray(img)).permute(2, 0, 1)
+        imgs.append(_colour_jitter(view, rng) if rng is not None else view)
 
         if dep_root is None:
             continue
@@ -158,12 +192,14 @@ def load_scene(scene_dir: Path, *, max_images: int = 4, image_size: int = 504,
         sy, sx = shape[0] / rgb.shape[0], shape[1] / rgb.shape[1]
         dbox = (int(box[0] * sx), int(box[1] * sy), int(box[2] * sx), int(box[3] * sy))
         d = _crop_resize(d, dbox, image_size)
+        if flip:
+            d = np.ascontiguousarray(d[:, ::-1])
         valids.append(np.isfinite(d) & (d > 0))
         deps.append(np.nan_to_num(d, nan=0.0, posinf=0.0, neginf=0.0))
 
     return Scene(
         name=scene_dir.name,
-        images=torch.from_numpy(np.stack(imgs)).permute(0, 3, 1, 2).contiguous(),
+        images=torch.stack(imgs).contiguous(),
         depth=torch.from_numpy(np.stack(deps)) if deps else None,
         valid=torch.from_numpy(np.stack(valids)) if valids else None,
         paths=paths,
