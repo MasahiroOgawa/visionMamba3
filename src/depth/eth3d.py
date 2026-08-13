@@ -28,14 +28,24 @@ import torch
 from PIL import Image
 from torch import Tensor
 
-# The split is by scene and fixed. `terrains` is the reported test set and never trains;
-# `relief_2` and `electro` drive early stopping / LR schedules and are also held out, so a
-# schedule can never be tuned on the scene the result is quoted from.
+# The split is by scene and fixed. `terrains` is the reported test set and never trains --
+# the assertion in _assert_not_test enforces that, and it is the only hold-out this experiment
+# needs.
+#
+# The other ten scenes all train. Until 2026-08-13 `relief_2` and `electro` were withheld as
+# a validation split, on a comment claiming they "drive early stopping / LR schedules". They
+# did not: VAL_SCENES was referenced only by its own definition and by the assertion above,
+# and no code ever evaluated on it. So a fifth of the available training data was being
+# discarded for a purpose nothing exercised, against a reference implementation that trains on
+# all ten. VAL_SCENES stays defined, and empty, so the assertion keeps working and so the next
+# person sees why it is empty rather than re-adding a split with no consumer. Re-introducing a
+# validation split is fine, but it needs code that actually reads it, and it costs data.
 TEST_SCENE = "terrains"
-VAL_SCENES: tuple[str, ...] = ("relief_2", "electro")
+VAL_SCENES: tuple[str, ...] = ()
 TRAIN_SCENES: tuple[str, ...] = (
     "courtyard", "delivery_area", "facade", "kicker",
     "office", "pipes", "playground", "relief",
+    "electro", "relief_2",
 )
 
 
