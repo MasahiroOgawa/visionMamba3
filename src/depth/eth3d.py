@@ -149,6 +149,7 @@ def _colour_jitter(img: Tensor, rng: random.Random) -> Tensor:
 def load_scene(scene_dir: Path, *, max_images: int = 4, image_size: int = 504,
                with_depth: bool = True, rng: Optional[random.Random] = None,
                sample: Optional[random.Random] = None,
+               only: Optional[Sequence[Path]] = None,
                crop_scale: tuple[float, float] = (0.6, 1.0)) -> Scene:
     """Load up to ``max_images`` views, square-cropped and resized to ``image_size``.
 
@@ -176,11 +177,14 @@ def load_scene(scene_dir: Path, *, max_images: int = 4, image_size: int = 504,
     """
     scene_dir = Path(scene_dir)
     img_root, dep_root = _images_root(scene_dir), _depth_root(scene_dir) if with_depth else None
-    all_paths = sorted(img_root.rglob("*.JPG"))
-    if not all_paths:
-        raise FileNotFoundError(f"no images in {scene_dir}")
-    paths = (sorted(sample.sample(all_paths, min(max_images, len(all_paths))))
-             if sample is not None else all_paths[:max_images])
+    if only is not None:
+        paths = list(only)
+    else:
+        all_paths = sorted(img_root.rglob("*.JPG"))
+        if not all_paths:
+            raise FileNotFoundError(f"no images in {scene_dir}")
+        paths = (sorted(sample.sample(all_paths, min(max_images, len(all_paths))))
+                 if sample is not None else all_paths[:max_images])
 
     imgs, deps, valids = [], [], []
     for p in paths:
@@ -244,13 +248,30 @@ def iter_scenes(data_root: Path, scenes: Sequence[str], *, n_views: int = 4,
             "Download them from https://www.eth3d.net/datasets and unpack in place."
         )
     rng = random.Random(seed)
-    order = list(scenes)
-    while True:
-        rng.shuffle(order)
-        for name in order:
-            yield load_scene(
-                Path(data_root) / "eth3d" / name,
-                max_images=n_views, image_size=image_size, with_depth=with_depth,
-                rng=rng if augment else None,
-                sample=rng,   # always: which views to draw is independent of augmentation
-            )
+    root = Path(data_root) / "eth3d"
+
+    if n_views == 1:
+        # Flat index over every training image, reshuffled each epoch. This is what the
+        # reference does (a shuffled DataLoader over all images flattened across scenes), and
+        # it matters because the scenes are very unevenly sized: 14 images in `pipes` against
+        # 76 in `facade`. Drawing a scene uniformly and then an image inside it -- the obvious
+        # implementation, and the one used here until 2026-08-14 -- makes a `pipes` image 2.67x
+        # more likely than uniform and a `facade` image 0.49x, a 5.4x spread across the set.
+        flat = [(name, p) for name in scenes
+                for p in sorted(_images_root(root / name).rglob("*.JPG"))]
+        if not flat:
+            raise FileNotFoundError(f"no images under {root} for scenes {list(scenes)}")
+        while True:
+            rng.shuffle(flat)
+            for name, path in flat:
+                yield load_scene(root / name, image_size=image_size, with_depth=with_depth,
+                                 rng=rng if augment else None, only=[path])
+    else:
+        # Multi-view: a Scene must come from one scene, so draw the scene in proportion to how
+        # many images it holds, which keeps the per-image probability uniform.
+        order, weights = list(scenes), [
+            len(sorted(_images_root(root / n).rglob("*.JPG"))) for n in scenes]
+        while True:
+            name = rng.choices(order, weights=weights, k=1)[0]
+            yield load_scene(root / name, max_images=n_views, image_size=image_size,
+                             with_depth=with_depth, rng=rng if augment else None, sample=rng)
