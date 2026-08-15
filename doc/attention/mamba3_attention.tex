@@ -39,7 +39,7 @@ attention, so putting it into a vision pipeline is a relabelling exercise plus a
 mask-builder swap. On top of that we build the image operator: two positional
 encodings (Mamba-3's own complex-SSM rotary, and an external 2-D RoPE applied to
 $\bm{B}$ and $\bm{C}$), two- and four-directional scans, and the non-causal collapse
-(VSSD-$\gamma$, called Visual State Space Duality --- VSSD --- in its source paper) that
+(VSSD-1pool, called Visual State Space Duality --- VSSD --- in its source paper) that
 removes causality without multi-scan. Four applications
 follow --- segmentation-head design, CIFAR-10 classification, ETH3D camera pose, and
 ETH3D metric depth --- each reported with the provenance of its numbers, including
@@ -303,7 +303,7 @@ Using only the objects above, we will:
         self/cross-attention blocks to build an image encoder; then
         combine several views via cross-view attention for the 3-D
         setting (Section~\ref{sec:images}).
-  \item Derive the non-causal collapse \emph{VSSD-$\gamma$} of \cite{vssd}
+  \item Derive the non-causal collapse \emph{VSSD-1pool} of \cite{vssd}
         as an algebraic alternative to bidirectional scans, and show
         that it collapses the structured $T\times T$ mask $\bm{L}$ to
         a single learned $T$-vector $\bm{m}$
@@ -1056,8 +1056,8 @@ cancels. \S\ref{sec:rotary-vssd} makes that argument in full and states plainly 
 and do not claim.
 
 \paragraph{That it works.}
-At $T{=}1025$ and $30$ epochs, $n{=}1$ lifts VSSD-$\gamma$ from $19.14\%$ to $58.98\%$ and
-VSSD-$\beta,\gamma$ from $19.35\%$ to $59.69\%$ (Table~\ref{tab:ablation}): a total
+At $T{=}1025$ and $30$ epochs, $n{=}1$ lifts VSSD-1pool from $19.14\%$ to $58.98\%$ and
+VSSD-2pool from $19.35\%$ to $59.69\%$ (Table~\ref{tab:ablation}): a total
 collapse turned back into ordinary training by bounding one quantity. It does not make the
 rotary preferable --- both stay below their own no-encoding rows and well below 2-D RoPE
 alone --- so \S\ref{sec:2drope}'s encoding is still what we deploy at long $T$.
@@ -1172,7 +1172,7 @@ in this note: self-attention (\S\ref{sec:self}) rotates both projections by the
 token's own $(r,c)$; cross-attention (\S\ref{sec:cross}) rotates $\bm{C}^q$ by
 the query-side positions and $\bm{B}^{kv}$ by the key-side positions, so
 \eqref{eq:crossB-out} scores a query against a key by their \emph{relative}
-grid offset; VSSD-$\gamma$ (\S\ref{sec:ncssd}) rotates the same two projections even
+grid offset; VSSD-1pool (\S\ref{sec:ncssd}) rotates the same two projections even
 though its mask has collapsed. Applying it at the projections rather than inside
 the kernel is what keeps it operator-agnostic --- and it is why the fused kernel
 of \S\ref{sec:impl-kernel} is handed $\text{Angles}=\bm{0}$ to disable its own
@@ -1180,12 +1180,12 @@ built-in 1-D rotary, which would otherwise rotate twice.
 
 The three operators do not depend on it equally. Bidirectional SSD encodes
 position twice over, once through RoPE and once through the mask's decay in
-$|i-j|$, so it degrades gracefully without RoPE. VSSD-$\gamma$ has no second channel:
+$|i-j|$, so it degrades gracefully without RoPE. VSSD-1pool has no second channel:
 \S\ref{sec:ncssd-mamba3} shows its $T\times T$ mask collapses to a per-token
 scalar that cannot express any $|i-j|$ dependence, leaving RoPE as its
 \emph{only} source of relative position. Omitting RoPE therefore does not
 penalise the two operators equally, and a comparison run without it understates
-VSSD-$\gamma$ specifically (\S\ref{sec:ncssd-when}).
+VSSD-1pool specifically (\S\ref{sec:ncssd-when}).
 
 \subsection{Positional encoding in the CIFAR-10 study}\label{sec:pos-cifar}
 
@@ -1304,7 +1304,7 @@ four scans of Vision-Mamba / V-Mamba realized under the Mamba-3 SSD
 kernel.
 
 %% ================================================================
-\subsection{\texorpdfstring{VSSD-$\gamma$}{VSSD-gamma}}
+\subsection{\texorpdfstring{VSSD-1pool}{VSSD-1pool}}
 \label{sec:ncssd}
 %% ================================================================
 
@@ -1342,7 +1342,7 @@ contribution to the state no longer depends on \emph{when} it
 arrives, only on its own coefficient $1/A_i$. The mechanism is now
 \emph{self-referential}: each token decides its own weight.
 
-\subsubsection{Bidirectional VSSD-$\gamma$ collapses to a global hidden state}
+\subsubsection{Bidirectional VSSD-1pool collapses to a global hidden state}
 
 The recurrence \eqref{eq:nc-unroll} is still causal in the sense that
 $\bm{h}_t$ sums only over $i\le t$. Run it once forward and once
@@ -1357,7 +1357,7 @@ outer product appearing in \eqref{eq:Hrec}):
 \end{align}
 The $-\tfrac{1}{A_i}\bm{Z}_i$ correction removes the double counting
 of $j=i$. The last equality is the key observation of
-\cite{vssd}: the bidirectional VSSD-$\gamma$ hidden state is
+\cite{vssd}: the bidirectional VSSD-1pool hidden state is
 \emph{independent of $i$}. Writing
 \begin{equation}\label{eq:nc-H}
   \bm{H} \;:=\; \sum_{j=1}^{L}\tfrac{1}{A_j}\bm{Z}_j
@@ -1390,7 +1390,7 @@ Comparing \eqref{eq:nc-Y} with the SSD identity
 \begin{equation}
   \bm{Y}_{\text{SSD}} \;=\; \bigl(\bm{L}\odot\bm{C}\bm{B}^\top\bigr)\bm{X},
   \qquad
-  \bm{Y}_{\text{VSSD-}\gamma} \;=\; \bm{C}\bigl((\bm{B}\odot\bm{m})^\top\bm{X}\bigr),
+  \bm{Y}_{\text{VSSD-1pool}} \;=\; \bm{C}\bigl((\bm{B}\odot\bm{m})^\top\bm{X}\bigr),
 \end{equation}
 the $T\times T$ structured mask $\bm{L}$ has been replaced by a
 $T$-vector $\bm{m}$ that column-scales $\bm{B}$. The two operations
@@ -1399,7 +1399,7 @@ are no longer of the same shape:
   \item SSD pays $O(T^2 N)$ to form $\bm{L}\odot\bm{C}\bm{B}^\top$,
         then $O(T^2 D)$ to multiply by $\bm{X}$, with state of size
         $\bm{L}$ ($O(T^2)$ if materialized).
-  \item VSSD-$\gamma$ pays $O(TND)$ to form $\bm{H}$, then $O(TND)$ for
+  \item VSSD-1pool pays $O(TND)$ to form $\bm{H}$, then $O(TND)$ for
         $\bm{C}\bm{H}$, with state of size $\bm{H}\in\mathbb{R}^{N\times D}$
         ($O(ND)$, \emph{independent of $T$}).
 \end{itemize}
@@ -1443,10 +1443,10 @@ triangle and gives $\bigl(\tfrac12\bigr)^{|i-j|}$, a genuine distance decay:
     i{=}4 & 1/8  & 1/4  & 1/2  & 1
   \end{array}
 \end{equation*}
-VSSD-$\gamma$'s weight is $m_j$, which carries no $i$ at all, so the same
+VSSD-1pool's weight is $m_j$, which carries no $i$ at all, so the same
 table reads
 \begin{equation*}
-  \bm{L}^{\text{VSSD-}\gamma} =
+  \bm{L}^{\text{VSSD-1pool}} =
   \begin{array}{c|cccc}
      & j{=}1 & j{=}2 & j{=}3 & j{=}4 \\ \hline
     i{=}1 & m_1 & m_2 & m_3 & m_4 \\
@@ -1517,7 +1517,7 @@ factors out of the Hadamard product:
      = \bm{C}\,(\bm{B}\odot\bm{m})^\top,
 \end{equation}
 recovering \eqref{eq:nc-Y}. The Mamba-3 extras compose cleanly on top
-of VSSD-$\gamma$:
+of VSSD-1pool:
 \begin{itemize}
   \item The rotation mechanism of \S\ref{sec:rope} still applies: rotate
         $\bm{B}_j, \bm{C}_i$ by $\bm{R}_{\le j}, \bm{R}_{\le i}$ before
@@ -1536,7 +1536,7 @@ survive the NC reduction \emph{as constructed here}
 ($\beta_t\equiv0$ imposed so that $\bm{L}_{ij}=m_j$ falls out
 directly): $\beta_t$ implements a two-band relative bias that
 fundamentally depends on $i,j$ separation, which this single-vector
-$\bm{m}$ cannot represent. VSSD-$\gamma$ is thus strictly a
+$\bm{m}$ cannot represent. VSSD-1pool is thus strictly a
 Mamba-2-style reduction of Mamba-3 in this form — useful when the
 mask's expressivity is not needed (Section~\ref{sec:ncssd-when}).
 Section~\ref{sec:ncssd-beta} shows that the causal $\beta$-band is in
@@ -1563,14 +1563,14 @@ explicit $T\times T$ tensor at any point.
 
 \subsubsection{The VSSD image block}
 
-The VSSD-$\gamma$ operator \eqref{eq:nc-Y} replaces the SSD kernel inside an
+The VSSD-1pool operator \eqref{eq:nc-Y} replaces the SSD kernel inside an
 otherwise standard vision block. Following \cite{vssd}~\S 3.3:
 \begin{enumerate}
   \item \textbf{Local Perception Unit (LPU)} \cite{vssd}: a depthwise
         $3{\times}3$ convolution applied to the patch grid before the
-        VSSD-$\gamma$ and again before the FFN, injecting local 2-D
+        VSSD-1pool and again before the FFN, injecting local 2-D
         inductive bias on top of the global, position-independent
-        VSSD-$\gamma$ context.
+        VSSD-1pool context.
   \item \textbf{Depth-wise conv 1-D $\to$ 2-D.} The causal Conv1D
         used inside Mamba-2 between the input and the SSD kernel is
         replaced by a non-causal depth-wise Conv2D with kernel
@@ -1583,14 +1583,14 @@ otherwise standard vision block. Following \cite{vssd}~\S 3.3:
         \S\ref{sec:rope}'s rotation mechanism, applied here with a
         position-based rather than content-based angle.
   \item \textbf{FFN, residual, normalization.} A standard
-        Transformer-style FFN follows the VSSD-$\gamma$; both the VSSD-$\gamma$ and
+        Transformer-style FFN follows the VSSD-1pool; both the VSSD-1pool and
         the FFN are wrapped in residual connections, matching the
         ViT / Swin block layout rather than Mamba's pre-norm SwiGLU
         layout.
   \item \textbf{Hybrid with MSA in the last stage.} The four-stage
-        backbone uses VSSD-$\gamma$ blocks in stages~1--3 and standard
+        backbone uses VSSD-1pool blocks in stages~1--3 and standard
         softmax MSA in the last stage. The rationale is that early
-        stages have many tokens, where the $O(T)$ scaling of VSSD-$\gamma$
+        stages have many tokens, where the $O(T)$ scaling of VSSD-1pool
         dominates; the last stage has few tokens but high-level
         semantics, where the per-pair adaptivity of softmax MSA pays
         off.
@@ -1602,17 +1602,17 @@ otherwise standard vision block. Following \cite{vssd}~\S 3.3:
 \mathbb{R}^{L}$ acts as the only token-dependent weight in
 \eqref{eq:nc-Y}, it can be visualized as a 2-D heat map over the patch
 grid. Empirically \cite{vssd} report that $\bm{m}$ concentrates on
-the foreground object of the image — i.e.\ VSSD-$\gamma$ ends up learning a
+the foreground object of the image — i.e.\ VSSD-1pool ends up learning a
 saliency-like weighting that the SSD mask $\bm{L}$ never makes
 explicit.
 
-\subsubsection{When to use VSSD-$\gamma$ versus bidirectional SSD}
+\subsubsection{When to use VSSD-1pool versus bidirectional SSD}
 \label{sec:ncssd-when}
 
 \begin{center}
 \begin{tabular}{|l|l|l|}
 \hline
- & \textbf{Bidirectional SSD} (\S\ref{sec:bidi}) & \textbf{VSSD-$\gamma$} (this section)\\ \hline
+ & \textbf{Bidirectional SSD} (\S\ref{sec:bidi}) & \textbf{VSSD-1pool} (this section)\\ \hline
 Mask state         & $O(T^2)$ (or banded fused kernel) & $O(ND)$ \\ \hline
 Compute per layer  & $O(T^2(N+D))\cdot k_{\text{scans}}$ & $O(TND)$ \\ \hline
 Per-pair adaptivity & $\bm{L}_{ij}$ and $\bm{C}_i^\top\bm{B}_j$ & $\bm{C}_i^\top\bm{B}_j$ only \\ \hline
@@ -1623,33 +1623,33 @@ Typical regime      & moderate $T$, structure-rich tokens & long $T$, vision-sty
 \end{center}
 The ``Position encoding'' row deserves emphasis, because it is the row most
 easily lost in an experiment. Bidirectional SSD gets relative position from two
-independent sources and VSSD-$\gamma$ from one, so the two operators are only compared
+independent sources and VSSD-1pool from one, so the two operators are only compared
 fairly when RoPE (\S\ref{sec:rope2d}) is actually enabled. Disable it and
-bidirectional still has the decay band to fall back on while VSSD-$\gamma$ has nothing
+bidirectional still has the decay band to fall back on while VSSD-1pool has nothing
 --- the resulting gap measures the missing positional encoding at least as much
 as it measures the operators. Any benchmark table comparing the two should
 therefore record whether RoPE was on.
 
-The two are not mutually exclusive: a hybrid stack can use VSSD-$\gamma$ in
+The two are not mutually exclusive: a hybrid stack can use VSSD-1pool in
 the early, high-resolution stages where $T$ dominates the cost, and
 bidirectional SSD (or softmax MSA, as in VSSD) in deeper stages where
 the mask's per-pair weighting matters. For our multi-view setting
-(\S\ref{sec:multiview}), VSSD-$\gamma$ also offers a free state-compressed
-cross-view block: each view's VSSD-$\gamma$ hidden state
+(\S\ref{sec:multiview}), VSSD-1pool also offers a free state-compressed
+cross-view block: each view's VSSD-1pool hidden state
 $\bm{H}^{(v)}\in\mathbb{R}^{N\times D}$ is already in the form that
 \eqref{eq:crossA-out} consumes, so cross-view attention reduces to
 $\bm{C}^{q\,\top}\sum_v \bm{H}^{(v)}$ with no additional kernel.
 
 %% ================================================================
-\subsection{\texorpdfstring{VSSD-$\beta,\gamma$}{VSSD-beta,gamma}}
+\subsection{\texorpdfstring{VSSD-2pool}{VSSD-2pool}}
 \label{sec:ncssd-beta}
 %% ================================================================
 
-Section~\ref{sec:ncssd-mamba3} showed that the single-vector VSSD-$\gamma$
+Section~\ref{sec:ncssd-mamba3} showed that the single-vector VSSD-1pool
 collapse, built with $\beta_t\equiv0$, reduces Mamba-3 to a
 Mamba-2-style operator. This section asks a sharper question: can the
 collapse be extended to retain some of the $\beta$-band's capacity
-without giving up VSSD-$\gamma$'s $O(ND)$ state? The answer is yes for the
+without giving up VSSD-1pool's $O(ND)$ state? The answer is yes for the
 causal mask, and yes-with-a-cost for the non-causal one.
 
 \subsubsection{The causal \texorpdfstring{$\bm{L}_3$}{L3} mask is secretly rank-one off the diagonal}
@@ -1675,7 +1675,7 @@ term. In the causal, single-direction case, $\bm{L}_3$ is therefore
 two-band structure of \S\ref{sec:trap} was never a rank obstruction,
 only a bookkeeping one.
 
-Under the VSSD-$\gamma$ reinterpretation ($\alpha_t\equiv1$, so
+Under the VSSD-1pool reinterpretation ($\alpha_t\equiv1$, so
 $\bar A_t\equiv1$ for all $t$, and $\gamma_j$ identified with
 \S\ref{sec:ncssd}'s own $1/A_j$ --- \emph{not} derived from a real
 decay, exactly as there --- with $\beta_{j+1}$ likewise learned
@@ -1733,7 +1733,7 @@ causal-plus-anticausal recurrent pair (ordinary bidirectional SSD,
 $O(ND)$ global summary. The $\beta$-band's shift structure is what
 breaks the symmetry that lets $\gamma$ alone collapse.
 
-\subsubsection{\texorpdfstring{VSSD-$\beta,\gamma$}{VSSD-beta,gamma}: a second, independently-read pool}
+\subsubsection{\texorpdfstring{VSSD-2pool}{VSSD-2pool}: a second, independently-read pool}
 
 The obstruction above is specifically that \emph{both} pools would
 need to be read out through the \emph{same} $\bm{C}_i$. It is tempting
@@ -1786,7 +1786,7 @@ like every other weight in this document, just with two separate sets
 of weights instead of one shared set. Stacking $\bm{m}^{(1)},\bm{m}^{(2)}$ row-wise gives
 exactly the $2\times L$ matrix this section is named for. Two
 independent state summaries $\bm{H}^{(1)},\bm{H}^{(2)}\in
-\mathbb{R}^{N\times D}$ are needed --- $2\times$ VSSD-$\gamma$'s usual
+\mathbb{R}^{N\times D}$ are needed --- $2\times$ VSSD-1pool's usual
 $O(ND)$ state and compute, still $O(TND)$ overall, still independent
 of $T$ in memory, and still strictly cheaper than bidirectional SSD's
 $O(T^2(N+D))$ once $T$ is large.
@@ -2087,7 +2087,7 @@ The projections produce
   \bm{m} = \mathrm{softplus}(A_{\log})\in\mathbb{R}_{>0}^{T}=\mathbb{R}_{>0}^{1296}.
 \end{equation}
 $\bm{V}$ stacks the value-projected rows $\bm{v}_t =
-\mathrm{SiLU}(\bm{W}_V\bm{x}_t)$ — the matrix that enters the VSSD-$\gamma$
+\mathrm{SiLU}(\bm{W}_V\bm{x}_t)$ — the matrix that enters the VSSD-1pool
 identity \eqref{eq:nc-Y} (filling its placeholder $\bm{X}$, in the
 sense of the bridge of \S\ref{sec:self}).
 The crucial step is that $\bm{m}$ is a \emph{single positive scalar
@@ -2127,14 +2127,14 @@ On the same $T\!=\!1296$ tokens and same $N, D$:
 \begin{center}
 \begin{tabular}{|l|l|l|l|}
 \hline
- & \textbf{SSD (Mamba-3)} & \textbf{Softmax MSA} & \textbf{VSSD-$\gamma$} \\ \hline
+ & \textbf{SSD (Mamba-3)} & \textbf{Softmax MSA} & \textbf{VSSD-1pool} \\ \hline
 Per-pair coupling      & $\bm{L}_{ij}\!\cdot\!\bm{C}_i^\top\bm{B}_j$ & $\mathrm{softmax}(\bm{Q}_i^\top\bm{K}_j)$ & $m_j$ \emph{only} \\ \hline
 State size             & $\Theta(T^2)$ if $\bm{L}$ materialized & $\Theta(T^2)$ & $\Theta(ND) = 24\,576$ \\ \hline
 Cost (this image)      & $O(T^2 N) \approx 1.07\!\times\!10^{8}$ & $O(T^2 D) \approx 6.4\!\times\!10^{8}$ & $O(TND) \approx 3.2\!\times\!10^{7}$ \\ \hline
 Scaling with image side & quadratic in $T$ & quadratic in $T$ & linear in $T$ \\ \hline
 \end{tabular}
 \end{center}
-The VSSD-$\gamma$ column is roughly $20\times$ cheaper than softmax MSA on
+The VSSD-1pool column is roughly $20\times$ cheaper than softmax MSA on
 this image and stays linear when the image grows; the cost paid is
 that every output position reads from the \emph{same} summary
 $\bm{H}$, with the only token-dependent weight being the scalar
@@ -2156,7 +2156,7 @@ than left implicit in the code.
 \label{sec:impl-precision}
 
 Every operator runs under \textbf{bf16} autocast, uniformly --- the same dtype
-for softmax attention, bidirectional SSD and VSSD-$\gamma$, so an accuracy comparison
+for softmax attention, bidirectional SSD and VSSD-1pool, so an accuracy comparison
 between them is not partly a precision comparison. bf16 rather than fp16 is
 deliberate: the decay factors of \S\ref{sec:decay} enter the mask as a
 \emph{cumulative product} $\prod_{k=j+1}^{i}\alpha_k$ along the sequence, which
@@ -2191,7 +2191,7 @@ Two traps are worth stating explicitly.
 Bidirectional SSD runs on the upstream Mamba-3 SISO Triton kernel by default: it
 is both faster than the PyTorch reference path and the path any published
 number should be quoted from. The reference path remains for CPU runs and for
-kernel debugging. VSSD-$\gamma$ never uses it --- \eqref{eq:nc-Y} is two einsums, with
+kernel debugging. VSSD-1pool never uses it --- \eqref{eq:nc-Y} is two einsums, with
 no mask to fuse.
 
 Reaching the kernel needs one piece of plumbing. Upstream's \verb|mamba_ssm|
@@ -2244,7 +2244,7 @@ the same interface so the dispatch site picks between them via a flag.
 \paragraph{New code (added in this work).}
 \begin{itemize}
   \item \texttt{src/\allowbreak{}mamba3\_\allowbreak{}attn/\allowbreak{}mamba3/\allowbreak{}vssd\_\allowbreak{}attention.py} -- the
-        VSSD-$\gamma$ operator. Two einsums (no $T\times T$ mask, no
+        VSSD-1pool operator. Two einsums (no $T\times T$ mask, no
         Triton kernel), 135 lines, CPU-compatible.
   \item \texttt{src/\allowbreak{}mamba3\_\allowbreak{}attn/\allowbreak{}da3\_\allowbreak{}adapter.py} -- new
         \texttt{Mamba3VSSDAdapter} wrapper with the same kwargs as
@@ -2349,7 +2349,7 @@ encoding).
 %% ================================================================
 
 The attention layers of Sections~\ref{sec:self}--\ref{sec:images} and
-the VSSD-$\gamma$ variant of Section~\ref{sec:ncssd-mamba3} all output a
+the VSSD-1pool variant of Section~\ref{sec:ncssd-mamba3} all output a
 token tensor of the same shape as their input, $\bm{Y}\in
 \mathbb{R}^{T\times D}$ (for $H,W,P,D,T$ as in
 \S\ref{sec:self-worked}, the working example is
@@ -2482,11 +2482,11 @@ binary cross-entropy on $\bm{M}_q$ (or Dice) for the matched pairs.
 Heads A, B, and C all consume $\bm{Y}\in\mathbb{R}^{T\times D}$ and
 nothing more. Whether $\bm{Y}$ was produced by
 \eqref{eq:self-out} (SSD self-attention), \eqref{eq:bidi4}
-(bidirectional SSD), or \eqref{eq:nc-Y} (VSSD-$\gamma$), the
+(bidirectional SSD), or \eqref{eq:nc-Y} (VSSD-1pool), the
 downstream pipeline is identical. The only practical differences are:
 
 \begin{itemize}
-  \item VSSD-$\gamma$'s per-patch saliency
+  \item VSSD-1pool's per-patch saliency
         $\bm{m}\in\mathbb{R}^{T}$ already concentrates on the
         foreground (\S\ref{sec:vssd-worked}); this provides a useful
         \emph{initial} class-agnostic mask that Head~C can refine
@@ -2498,8 +2498,8 @@ downstream pipeline is identical. The only practical differences are:
         (which has no other position information at the output) and
         less critical for Heads~B/C (which inject position via the
         decoder's spatial structure or query embeddings).
-  \item The cost asymmetry of \S\ref{sec:vssd-worked} — VSSD-$\gamma$'s
-        $O(TND)$ vs softmax MSA's $O(T^2D)$ — propagates: with VSSD-$\gamma$
+  \item The cost asymmetry of \S\ref{sec:vssd-worked} — VSSD-1pool's
+        $O(TND)$ vs softmax MSA's $O(T^2D)$ — propagates: with VSSD-1pool
         the bottleneck moves from the backbone to the segmentation
         head, especially Head~B's pyramid, so high-resolution
         segmentation benefits disproportionately from VSSD backbones.
@@ -2656,29 +2656,29 @@ baselines measured alongside for reference. Numbers are generated directly from
 the run directories by \texttt{scripts/\allowbreak{}make\_\allowbreak{}ablation\_\allowbreak{}table.py}; a cell with no
 run prints as ``--'' rather than being filled in.
 
-The fourth operator, VSSD-$\beta,\gamma$ (\S\ref{sec:ncssd-beta}), is the one row
+The fourth operator, VSSD-2pool (\S\ref{sec:ncssd-beta}), is the one row
 group that is \emph{not} parameter-matched: its second pool is a real second query
 and scalar projection, $2.93$\,M against the others' $2.71$\,M, so it is $8\%$
 larger and its cells should be read against that column rather than against the
 others' accuracies alone. It was included to test a specific prediction of
 \S\ref{sec:ncssd-beta}, and the prediction did not survive. If the encodings help
-VSSD-$\gamma$ mainly by restoring \emph{query-specific} behaviour to an operator
+VSSD-1pool mainly by restoring \emph{query-specific} behaviour to an operator
 whose mask collapsed to one shared summary, a second independently-read pool attacks
 the same deficit by another route, so the two should overlap and the encodings should
-buy VSSD-$\beta,\gamma$ visibly \emph{less}. They bought it \emph{more}: $+4.87$ from
-the rotary against VSSD-$\gamma$'s $+3.39$, $+3.99$ from 2-D RoPE against $+2.64$,
+buy VSSD-2pool visibly \emph{less}. They bought it \emph{more}: $+4.87$ from
+the rotary against VSSD-1pool's $+3.39$, $+3.99$ from 2-D RoPE against $+2.64$,
 $+6.64$ from both against $+5.42$. All three gaps exceed the $0.95$-point spread that
 compounding two single-seed measurements implies, and all three point the same way.
 
 The overlap argument is therefore not supported --- but neither is its opposite,
-because the comparison has a confound worth naming. VSSD-$\beta,\gamma$ starts lower
+because the comparison has a confound worth naming. VSSD-2pool starts lower
 ($75.1$ against $75.8$) and the two finish within $0.58$ of each other ($81.8$
 against $81.2$), so both rows look like they are approaching the same ceiling near
 $81.5$, and a larger gain from a lower start is what any ceiling produces regardless
 of mechanism. What the row does establish is simpler and independent of that: at
 $T{=}65$ the second pool buys nothing. Every cell-to-cell difference against
-VSSD-$\gamma$ ($-0.64$, $+0.84$, $+0.71$, $+0.58$) sits at or inside the repeat
-spread, for $8\%$ more parameters. On this evidence VSSD-$\beta,\gamma$ is not worth
+VSSD-1pool ($-0.64$, $+0.84$, $+0.71$, $+0.58$) sits at or inside the repeat
+spread, for $8\%$ more parameters. On this evidence VSSD-2pool is not worth
 its cost here, and \S\ref{sec:ncssd-beta}'s ``motivated extension, not a proof''
 caveat stands as written.
 
@@ -2688,7 +2688,7 @@ caveat stands as written.
 Accuracy is best test accuracy; latency and peak memory are measured at batch 128
 on the same GPU. Two cautions in reading small differences: repeat runs of one
 configuration differed by $0.67$ points, so gaps below $\sim$$0.7$ are not
-meaningful, and every cell is a single seed. The VSSD-$\beta,\gamma$ rows are not
+meaningful, and every cell is a single seed. The VSSD-2pool rows are not
 parameter-matched with the rest ($2.93$\,M against $2.71$\,M); see the Par.\ column.
 Enc.\ takes one of: ``---'' no encoding; ``2-D RoPE'' the external
 encoding; ``rotary'' Mamba-3's own complex-SSM rotary; ``1-turn rotary'' that same rotary
@@ -2716,7 +2716,7 @@ between them and a shared one would collapse the $T{=}65$ panel to a line. At
 $T{=}65$ memory is almost flat across operators and the plot is effectively an
 accuracy ranking; at $T{=}1025$ the state-space operators separate from softmax
 attention horizontally, which is the property the linear-time recurrence buys. The
-shared axis is stretched by one point, VSSD-$\gamma$ with both encodings at $18.9$
+shared axis is stretched by one point, VSSD-1pool with both encodings at $18.9$
 (\S\ref{sec:ablation}), which compresses the rest. The CNN appears only in the
 $T{=}65$ panel: it does not tokenise, so it has no token count for the right panel to
 place it at, and its memory does not sit on the same scaling curve the panel is
@@ -2735,21 +2735,21 @@ $T{=}65$:
 Operator & rotary alone & 2-D RoPE alone & sum of the two & measured together \\ \hline
 2-directional & $+1.15$ & $+2.34$ & $+3.49$ & $+1.45$ \\ \hline
 4-directional & $+0.73$ & $+1.74$ & $+2.47$ & $-0.07$ \\ \hline
-VSSD-$\gamma$ & $+3.39$ & $+2.64$ & $+6.03$ & $+5.42$ \\ \hline
+VSSD-1pool & $+3.39$ & $+2.64$ & $+6.03$ & $+5.42$ \\ \hline
 \end{tabular}
 \end{center}
 
 Every entry in the first two columns is positive: \emph{both} encodings help
 \emph{every} operator when it is the only one present. The rotary is therefore not
 harmful to the scan operators --- which is exactly how its marginal deltas ($-0.89$
-two-directional, $-1.81$ four-directional, $+2.78$ VSSD-$\gamma$) read when no
+two-directional, $-1.81$ four-directional, $+2.78$ VSSD-1pool) read when no
 rotary-only cell exists to compare against, and is what an earlier draft of this
 section concluded from precisely that missing column. What is negative is the
 \emph{interaction}: measured-together minus sum-of-the-two is $-2.04$ two-directional
-and $-2.54$ four-directional, against $-0.61$ for VSSD-$\gamma$, and that last figure
+and $-2.54$ four-directional, against $-0.61$ for VSSD-1pool, and that last figure
 is inside the $0.67$ repeat spread, i.e.\ indistinguishable from the two encodings
 simply adding. The encodings are individually useful everywhere, strongly redundant
-with each other on the scan operators, and close to complementary on VSSD-$\gamma$.
+with each other on the scan operators, and close to complementary on VSSD-1pool.
 
 That pattern is \emph{not} about position: the rotary's angle
 $\theta_t=\bm{W}_\theta\bm{x}_t$ \eqref{eq:dtheta} is a function of a token's own
@@ -2759,16 +2759,16 @@ of $\bm{C}_i$ before the readout, and how much that matters depends on how much
 query-specific behaviour the operator already has elsewhere. The scan operators already
 give every query its own full, per-pair interaction through the mask $L_{ij}$
 \eqref{eq:L3}, so one more content-dependent knob is largely redundant complexity.
-\S\ref{sec:ncssd-mamba3} shows VSSD-$\gamma$'s mask has instead collapsed to a single
+\S\ref{sec:ncssd-mamba3} shows VSSD-1pool's mask has instead collapsed to a single
 shared summary $\bm{H}$ that every query reads identically, so rotating $\bm{C}_i$ by
 its own content is close to the \emph{only} source of query-specific behaviour it has
---- which is why it helps so much. 2-D RoPE helps VSSD-$\gamma$ for a related reason and
+--- which is why it helps so much. 2-D RoPE helps VSSD-1pool for a related reason and
 also supplies what the rotary cannot: genuine relative-position information, which the
-scan operators already had from their mask's decay in $|i-j|$ and VSSD-$\gamma$ had
+scan operators already had from their mask's decay in $|i-j|$ and VSSD-1pool had
 none of at all. The two accounts together predict the interaction pattern above ---
 redundant where the operator already has both properties, additive where it has
-neither. VSSD-$\gamma$ moves $75.76 \to 81.18$ across its row. The implementation
-defaults to each operator's best cell: the rotary on for VSSD-$\gamma$, off for the
+neither. VSSD-1pool moves $75.76 \to 81.18$ across its row. The implementation
+defaults to each operator's best cell: the rotary on for VSSD-1pool, off for the
 scan operators, with 2-D RoPE on throughout.
 
 Two things the grid does \emph{not} establish, both because of the $0.67$-point
@@ -2794,7 +2794,7 @@ All three single-encoding cells were re-measured under the corrected pairing, so
 every cell of Table~\ref{tab:ablation} now comes from one operator build rather
 than being carried over on the argument that the fix could not have touched them.
 Two moved within the repeat spread ($82.71\to82.78$ two-directional,
-$83.26\to83.28$ four-directional); VSSD-$\gamma$ moved $79.40\to78.40$, a full point,
+$83.26\to83.28$ four-directional); VSSD-1pool moved $79.40\to78.40$, a full point,
 slightly beyond it. That is broadly the ``unaffected'' the argument predicts, but
 on single seeds it is corroboration rather than proof --- which is the reason for
 re-running them instead of assuming.
@@ -2896,11 +2896,11 @@ epoch~6, while the same operator with no encoding falls $1.97\to1.57$ over five.
 \paragraph{Confirmation.}
 If the spread is the cause, bounding it must restore training with nothing else
 changed. Scaling the per-token increment by $65/1025$ gives $T{=}1025$ exactly the
-spread $T{=}65$ had (\texttt{--rope-angle-scale}, VSSD-$\gamma$, six epochs):
+spread $T{=}65$ had (\texttt{--rope-angle-scale}, VSSD-1pool, six epochs):
 \begin{center}\small
 \begin{tabular}{|l|cc|cc|}
 \hline
-$T{=}1025$, VSSD-$\gamma$ & ep.\ 1 & ep.\ 3 & ep.\ 6 & test \\ \hline
+$T{=}1025$, VSSD-1pool & ep.\ 1 & ep.\ 3 & ep.\ 6 & test \\ \hline
 rotary, unscaled ($\sim$$160$ turns) & $2.26$ / $15.2\%$ & $2.19$ / $16.5\%$ & $2.26$ / $13.6\%$ & $14.6\%$ \\ \hline
 rotary, scaled ($\sim$$10$ turns) & $1.90$ / $30.3\%$ & $1.66$ / $39.6\%$ & $1.65$ / $39.6\%$ & $42.7\%$ \\ \hline
 no encoding (reference) & $1.97$ / $27.1\%$ & $1.75$ / $35.7\%$ & --- & --- \\ \hline
@@ -2916,8 +2916,8 @@ full runs say so plainly. At $30$ epochs with the spread pinned to one turn
 \begin{tabular}{|l|cc|cc|}
 \hline
 $T{=}1025$ & no encoding & 1-turn rotary & 2-D RoPE & 1-turn rotary $+$ 2-D RoPE \\ \hline
-VSSD-$\gamma$ & $63.9$ & $59.0$ & $\mathbf{70.1}$ & $64.8$ \\ \hline
-VSSD-$\beta,\gamma$ & $66.9$ & $59.7$ & $\mathbf{71.4}$ & $65.4$ \\ \hline
+VSSD-1pool & $63.9$ & $59.0$ & $\mathbf{70.1}$ & $64.8$ \\ \hline
+VSSD-2pool & $66.9$ & $59.7$ & $\mathbf{71.4}$ & $65.4$ \\ \hline
 \end{tabular}
 \end{center}
 The repair is worth $+40$ points against the collapsed cells ($19.1$ and $19.4$),
@@ -2936,7 +2936,7 @@ sequence length, 2-D RoPE alone.
 If the spread is the whole problem, the fix is to stop letting it depend on $T$: the fixed
 $n$-turn angle $\theta_j=2\pi n j/T$ of \eqref{eq:rope-turns}, derived in
 \S\ref{sec:rope-turns}, which removes the coupling outright rather than balancing it.
-Sweeping $n$ on VSSD-$\gamma$ at $T{=}1025$ (six epochs, test accuracy) is monotone in
+Sweeping $n$ on VSSD-1pool at $T{=}1025$ (six epochs, test accuracy) is monotone in
 favour of less spread:
 \begin{center}\small
 \begin{tabular}{|l|c|c|c|c|}
@@ -3172,8 +3172,8 @@ and are reported as such.
 \foreach \i/\name/\mix/\mixsty/\mask in {
   0/{DA3-SMALL}/{softmax\\self-attention}/bx/{$T\times T$ softmax},
   1/{+ bidirectional}/{bidirectional\\SSD}/tr/{$\tilde L_{ij}$ symmetric},
-  2/{+ VSSD-$\gamma$}/{VSSD-$\gamma$}/tr/{mask $\to$ vector $m$},
-  3/{+ VSSD-$\beta,\gamma$}/{VSSD-$\beta,\gamma$}/tr/{$m$ is $2\times T$}}
+  2/{+ VSSD-1pool}/{VSSD-1pool}/tr/{mask $\to$ vector $m$},
+  3/{+ VSSD-2pool}/{VSSD-2pool}/tr/{$m$ is $2\times T$}}
 {
   \begin{scope}[xshift=\i*\colsep]
     \node[hd]                          (h\i) at (0,0.95) {\name};
@@ -3206,8 +3206,8 @@ distillation phase, not the final state. DA3-SMALL is the zero-shot reference,
 so nothing in its column is trained at all. The
 three swapped columns differ \emph{only} in the mask their mixer applies, noted
 under each: a symmetric $|i-j|$ decay for the bidirectional scan, a single
-per-token vector for VSSD-$\gamma$, and two independently-read pools for
-VSSD-$\beta,\gamma$.}
+per-token vector for VSSD-1pool, and two independently-read pools for
+VSSD-2pool.}
 \label{fig:depth-variants}
 \end{figure}
 
@@ -3281,7 +3281,7 @@ frozen; it does not describe this one.
 
 \paragraph{Recipe at a glance.} The two phases differ in \emph{what is allowed
 to move}, and that difference is the single thing most often misread, so it is
-tabulated rather than left in prose. Counts are for VSSD-$\beta,\gamma$; the
+tabulated rather than left in prose. Counts are for VSSD-2pool; the
 one-pool operators have a $11.61$\,M mixer and $36.45$\,M total.
 
 \begin{center}
@@ -3441,7 +3441,7 @@ GPU at $504^2$ with four views, at every chunk size from $128$ down to $16$
 layers, not the mask blocks), and fits only at one view, which removes the
 multi-view signal the pipeline exists to use.
 
-\paragraph{VSSD-$\beta,\gamma$ in that architecture.} Running our operator through the
+\paragraph{VSSD-2pool in that architecture.} Running our operator through the
 same three-stage chain --- same data, same schedule, only the mixer swapped, so this is a
 one-variable comparison against a measured baseline:
 
@@ -3452,7 +3452,7 @@ one-variable comparison against a measured baseline:
 \midrule
 DA3-SMALL (zero-shot)      & $\mathbf{0.0417}$ & $0.9743$ & $\mathbf{0.0796}$ & $\mathbf{0.0175}$ \\
 bidirectional (CM22)       & $0.0531$ & $\mathbf{0.9972}$ & $0.1012$ & $0.0229$ \\
-VSSD-$\beta,\gamma$        & $0.0583$ & $0.9812$ & $0.1154$ & $0.0254$ \\
+VSSD-2pool        & $0.0583$ & $0.9812$ & $0.1154$ & $0.0254$ \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -3461,9 +3461,9 @@ VSSD-$\beta,\gamma$        & $0.0583$ & $0.9812$ & $0.1154$ & $0.0254$ \\
 of the harness's acceptance gates. Two things temper reading much into the $0.0583$ against
 $0.0531$: it is a single seed over twelve images, with no repeat-spread estimate for ETH3D
 of the kind \S\ref{sec:cifar} has for CIFAR-10; and the recipe was tuned while watching
-bidirectional's numbers, so the honest claim is that VSSD-$\beta,\gamma$ is \emph{not
+bidirectional's numbers, so the honest claim is that VSSD-2pool is \emph{not
 better under bidirectional's recipe}, not that it is worse. It is consistent with CIFAR-10,
-where the two-pool variant matched VSSD-$\gamma$ within the repeat spread for more
+where the two-pool variant matched VSSD-1pool within the repeat spread for more
 parameters.
 
 \paragraph{Superseded.} The numbers in this subsection and in
@@ -3493,7 +3493,7 @@ reference and both are now ported, but neither recovered the accuracy.
 
 \texttt{DepthStudent.init\_from\_da3} now reproduces the reference's own counts exactly
 ($125$ loaded, \texttt{shape\_mismatch=1}), and \texttt{patch\_embed} is bit-identical to
-DA3's. The scan operators report \texttt{125/282} and VSSD-$\gamma$ \texttt{125/270}, differing
+DA3's. The scan operators report \texttt{125/282} and VSSD-1pool \texttt{125/270}, differing
 only because their mixers hold different numbers of internal tensors.
 
 \paragraph{Ruled out by measurement, so as not to be re-checked.} Resolution
@@ -3533,9 +3533,9 @@ mixer & abs.\ rel.\,$\downarrow$ & $\delta{<}1.25$\,$\uparrow$ & RMSE\,$\downarr
 \midrule
 softmax (DA3-SMALL, zero-shot)  & $\mathbf{0.0323}$ & $\mathbf{1.0000}$ & $\mathbf{0.0605}$ & $\mathbf{0.0141}$ \\
 \midrule
-VSSD-$\beta,\gamma$ (iv)        & $0.0663$ & $0.9617$ & $0.1326$ & $0.0298$ \\
+VSSD-2pool (iv)        & $0.0663$ & $0.9617$ & $0.1326$ & $0.0298$ \\
 bidirectional (i)               & $0.0695$ & $0.9682$ & $0.1335$ & $0.0309$ \\
-VSSD-$\gamma$ (iii)             & $0.0738$ & $0.9612$ & $0.1403$ & $0.0331$ \\
+VSSD-1pool (iii)             & $0.0738$ & $0.9612$ & $0.1403$ & $0.0331$ \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -3545,7 +3545,7 @@ $0.0075$ in absolute relative error, which is \emph{smaller} than the per-view s
 deviation of $0.014$--$0.016$ that the runs reporting it measured across these same twelve
 views, and each row is a single seed. The operators are therefore not distinguishable here, and
 the ordering is not a ranking. The one observation worth carrying forward is directional:
-VSSD-$\beta,\gamma$ exceeds VSSD-$\gamma$ by $0.0075$, the same sign as CIFAR-10 at
+VSSD-2pool exceeds VSSD-1pool by $0.0075$, the same sign as CIFAR-10 at
 $T{=}1025$ (\S\ref{sec:ablation}), where the second pool gained $3.0$ points. Two tasks
 pointing the same way is mild support for the two-pool derivation of \S\ref{sec:two-pools} and
 nothing stronger.
@@ -3565,8 +3565,8 @@ weights & fused kernel & reference path \\
 \midrule
 retired implementation's own (CM22) & $0.1160$ & $\mathbf{0.0530}$ \\
 ours, bidirectional                 & $0.0695$ & $0.0681$ \\
-ours, VSSD-$\beta,\gamma$           & $0.0663$ & $0.0663$ \\
-ours, VSSD-$\gamma$                 & $0.0738$ & $0.0738$ \\
+ours, VSSD-2pool           & $0.0663$ & $0.0663$ \\
+ours, VSSD-1pool                 & $0.0738$ & $0.0738$ \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -3607,9 +3607,9 @@ checkpoints scored rather than only the last:
 \toprule
 arm & $1500$ steps & $+3000$ & $+6000$ & $+9000$ \\
 \midrule
-VSSD-$\beta,\gamma$ (iv) & $\mathbf{0.0663}$ & $0.0718$ & $0.0719$ & $0.0719$ \\
+VSSD-2pool (iv) & $\mathbf{0.0663}$ & $0.0718$ & $0.0719$ & $0.0719$ \\
 bidirectional (i)        & $\mathbf{0.0695}$ & $0.0721$ & $0.0709$ & $0.0707$ \\
-VSSD-$\gamma$ (iii)      & $\mathbf{0.0738}$ & $0.0756$ & $0.0756$ & $0.0757$ \\
+VSSD-1pool (iii)      & $\mathbf{0.0738}$ & $0.0756$ & $0.0756$ & $0.0757$ \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -3759,8 +3759,8 @@ mixer & abs.\ rel.$\downarrow$ & RMSE (m)$\downarrow$ & $\log_{10}\downarrow$ & 
 softmax (DA3-SMALL), zero-shot & $\mathbf{0.0323}$ & $\mathbf{0.0605}$ & $\mathbf{0.0141}$ & $\mathbf{1.0000}$ \\
 \midrule
 bidirectional        & $0.0550$ & $0.1034$ & $0.0239$ & $0.9991$ \\
-VSSD-$\gamma$        & \textsc{running} & \textsc{running} & \textsc{running} & \textsc{running} \\
-VSSD-$\beta,\gamma$  & \textsc{running} & \textsc{running} & \textsc{running} & \textsc{running} \\
+VSSD-1pool        & \textsc{running} & \textsc{running} & \textsc{running} & \textsc{running} \\
+VSSD-2pool  & \textsc{running} & \textsc{running} & \textsc{running} & \textsc{running} \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -3816,10 +3816,10 @@ updated operator (2-D RoPE, fused Triton kernel, pinned upstream submodule)
 rather than the 2026-04 snapshot that produced the legacy numbers above.
 
 %% ================================================================
-\section{Application 5: VSSD-$\beta,\gamma$ in the 3D point-tracking refiner}
+\section{Application 5: VSSD-2pool in the 3D point-tracking refiner}
 \label{sec:vssd-bg-tracking}
 
-CIFAR-10 shows VSSD-$\beta,\gamma$'s benefit concentrated at long sequence length
+CIFAR-10 shows VSSD-2pool's benefit concentrated at long sequence length
 (\S\ref{sec:rotary-vssd}). This experiment asks whether it transfers to the application the
 operator was built for.
 
@@ -3846,7 +3846,7 @@ Both arms therefore train from scratch for $20000$ steps with identical configur
 mean metric-AJ & drivetrack & pstudio & adt & mean \\
 \midrule
 WAFT$+$DA3-l$+$vmamba3 (one pool) & $0.141$ & $0.279$ & $0.318$ & $0.246$ \\
-$+$ VSSD-$\beta,\gamma$ (two pool) & $0.135$ & $0.271$ & $0.259$ & $0.222$ \\
+$+$ VSSD-2pool (two pool) & $0.135$ & $0.271$ & $0.259$ & $0.222$ \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -3861,7 +3861,7 @@ configuration inside the tracker repository reconstruct to roughly $0.226$, whic
 to the two-pool $0.222$ that ``the second pool hurts'' and ``this repository's baseline is
 $0.226$'' cannot yet be separated. The control that settles it is the one-pool configuration
 trained in this repository under exactly the protocol above. Until that runs, the defensible
-statement is that VSSD-$\beta,\gamma$ \emph{does not improve} metric-AJ here, not that it degrades
+statement is that VSSD-2pool \emph{does not improve} metric-AJ here, not that it degrades
 it.
 
 \paragraph{2-D RoPE was deliberately not applied.} It is the best CIFAR-10 pairing for this
@@ -3997,7 +3997,7 @@ Using only \eqref{eq:ssd-derived}, we have obtained:
         \eqref{eq:cvout}-style blocks and cross-view
         \eqref{eq:Lxview} blocks; or the compressed-state cross
         block \eqref{eq:crossA-out} when one side dominates.
-  \item \textbf{VSSD-$\gamma$:} reinterpret $A_t$ as a
+  \item \textbf{VSSD-1pool:} reinterpret $A_t$ as a
         current-token weight to obtain \eqref{eq:nc-Y},
         $\bm{Y} = \bm{C}\bigl((\bm{B}\odot\bm{m})^\top\bm{X}\bigr)$,
         which collapses the $T\times T$ mask $\bm{L}$ to a

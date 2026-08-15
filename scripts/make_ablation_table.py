@@ -2,7 +2,7 @@
 """Emit the Vision Mamba-3 ablation table and memory-vs-accuracy plot for
 doc/attention/mamba3_attention.tex.
 
-The grid is {2-dir, 4-dir, VSSD-gamma, VSSD-beta,gamma} x a 2x2 of
+The grid is {2-dir, 4-dir, VSSD-1pool, VSSD-2pool} x a 2x2 of
 {2-D RoPE on/off} x {Mamba-3 rotary on/off}, at both sequence lengths, plus the
 softmax and CNN baselines for context. The rotary-only cell is what lets the
 rotary's own effect be separated from its interaction with 2-D RoPE: alone it helps
@@ -10,7 +10,7 @@ every operator, but on top of RoPE it is redundant for the scan operators.
 
 Operator and encoding are separate fields rather than one concatenated label. That
 is narrower in the table -- the concatenated form overflowed the text width once
-VSSD-beta,gamma's rows existed, silently clipping the T=1025 memory column -- and it
+VSSD-2pool's rows existed, silently clipping the T=1025 memory column -- and it
 lets the plot's colour/marker lookup read the encoding directly. Deriving it by
 substring instead is a trap: "both" contains "rotary", and "+2-D RoPE +rotary"
 contains "+2-D RoPE", so the answer depended on the order of the tests.
@@ -66,14 +66,14 @@ ENC_LABELS = {NONE: "neither encoding", ROT: "rotary only",
 OP_COLOURS = {
     "2-dir SSD": "#4878CF",
     "4-dir SSD": "#E06C2B",
-    r"VSSD-$\gamma$": "#3A9E5C",
-    r"VSSD-$\beta,\gamma$": "#8E44AD",
+    r"VSSD-1pool": "#3A9E5C",
+    r"VSSD-2pool": "#8E44AD",
 }
 OP_LABELS = {
     "2-dir SSD": "2-directional",
     "4-dir SSD": "4-directional",
-    r"VSSD-$\gamma$": r"VSSD-$\gamma$",
-    r"VSSD-$\beta,\gamma$": r"VSSD-$\beta,\gamma$ (Ours)",
+    r"VSSD-1pool": r"VSSD-1pool",
+    r"VSSD-2pool": r"VSSD-2pool (Ours)",
 }
 BASE_COLOURS = {"CNN (ResNet)": "black", "Softmax attention": "0.6"}
 
@@ -111,21 +111,21 @@ ROWS = [
     # are adjacent. Their T=65 slot is deliberately empty: the repair only applies where the
     # accumulated spread is large, and running it at T=65 would report a fix for a failure
     # that does not occur there.
-    (r"VSSD-$\gamma$", NONE, "vit_mamba3_vssd", "vm3_ablation_patch4_norope", "vm3_t1025_norope"),
-    (r"VSSD-$\gamma$", ROT, "vit_mamba3_vssd", "vm3_ablation_patch4_norope_rotary", "vm3_t1025_rotary"),
-    (r"VSSD-$\gamma$", ROT1, "vit_mamba3_vssd", "", "vm3_t1025_turns1_vssd"),
-    (r"VSSD-$\gamma$", ROPE, "vit_mamba3_vssd", "vm3_ropeonly_recheck", "vm3_t1025_rope"),
-    (r"VSSD-$\gamma$", BOTH, "vit_mamba3_vssd", "vm3_interleaved_vit_mamba3_vssd", "vm3_t1025_rope_rotary"),
-    (r"VSSD-$\gamma$", BOTH1, "vit_mamba3_vssd", "", "vm3_t1025_turns1_rope_vssd"),
+    (r"VSSD-1pool", NONE, "vit_mamba3_vssd", "vm3_ablation_patch4_norope", "vm3_t1025_norope"),
+    (r"VSSD-1pool", ROT, "vit_mamba3_vssd", "vm3_ablation_patch4_norope_rotary", "vm3_t1025_rotary"),
+    (r"VSSD-1pool", ROT1, "vit_mamba3_vssd", "", "vm3_t1025_turns1_vssd"),
+    (r"VSSD-1pool", ROPE, "vit_mamba3_vssd", "vm3_ropeonly_recheck", "vm3_t1025_rope"),
+    (r"VSSD-1pool", BOTH, "vit_mamba3_vssd", "vm3_interleaved_vit_mamba3_vssd", "vm3_t1025_rope_rotary"),
+    (r"VSSD-1pool", BOTH1, "vit_mamba3_vssd", "", "vm3_t1025_turns1_rope_vssd"),
 
-    # VSSD-beta,gamma: its own dirs, because it was added after the first sweep and
+    # VSSD-2pool: its own dirs, because it was added after the first sweep and
     # is not parameter-matched with the rows above (2.93 M vs 2.71 M).
-    (r"VSSD-$\beta,\gamma$", NONE, "vit_mamba3_vssd_bg", "vm3_vssdbg_norope", "vm3_t1025_vssdbg_norope"),
-    (r"VSSD-$\beta,\gamma$", ROT, "vit_mamba3_vssd_bg", "vm3_vssdbg_norope_rotary", "vm3_t1025_vssdbg_rotary"),
-    (r"VSSD-$\beta,\gamma$", ROT1, "vit_mamba3_vssd_bg", "", "vm3_t1025_turns1_vssdbg"),
-    (r"VSSD-$\beta,\gamma$", ROPE, "vit_mamba3_vssd_bg", "vm3_vssdbg_rope", "vm3_t1025_vssdbg_rope"),
-    (r"VSSD-$\beta,\gamma$", BOTH, "vit_mamba3_vssd_bg", "vm3_vssdbg_rope_rotary", "vm3_t1025_vssdbg_rope_rotary"),
-    (r"VSSD-$\beta,\gamma$", BOTH1, "vit_mamba3_vssd_bg", "", "vm3_t1025_turns1_rope_vssdbg"),
+    (r"VSSD-2pool", NONE, "vit_mamba3_vssd_bg", "vm3_vssdbg_norope", "vm3_t1025_vssdbg_norope"),
+    (r"VSSD-2pool", ROT, "vit_mamba3_vssd_bg", "vm3_vssdbg_norope_rotary", "vm3_t1025_vssdbg_rotary"),
+    (r"VSSD-2pool", ROT1, "vit_mamba3_vssd_bg", "", "vm3_t1025_turns1_vssdbg"),
+    (r"VSSD-2pool", ROPE, "vit_mamba3_vssd_bg", "vm3_vssdbg_rope", "vm3_t1025_vssdbg_rope"),
+    (r"VSSD-2pool", BOTH, "vit_mamba3_vssd_bg", "vm3_vssdbg_rope_rotary", "vm3_t1025_vssdbg_rope_rotary"),
+    (r"VSSD-2pool", BOTH1, "vit_mamba3_vssd_bg", "", "vm3_t1025_turns1_rope_vssdbg"),
 ]
 
 # A fixed-turn rotary is the same architecture as the accumulating one -- only theta's
@@ -212,7 +212,7 @@ def write_table(rows) -> None:
       108pt of the line on padding alone.
     * The operator name prints once per group rather than on all four of its rows,
       with the rule between groups instead of between rows. This is for reading, not
-      width -- the column is still as wide as "VSSD-beta,gamma" either way -- but a
+      width -- the column is still as wide as "VSSD-2pool" either way -- but a
       4x4 factorial reads as four blocks, not sixteen unrelated lines.
     """
     lines = [
