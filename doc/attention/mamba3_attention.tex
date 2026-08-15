@@ -3742,6 +3742,49 @@ of the form ``roughly twice DA3-SMALL's error'' is a property of those twelve vi
 scene. (Measured on the $0.0619$ checkpoint, before the sampling fix; the ratio should be
 re-measured on the current one before it is quoted.)
 
+\subsection{The four-row comparison, all on one recipe}
+\label{sec:eth3d-final-table}
+
+This is the table the paper reports. Every row is produced by the current code in this
+repository, on the recipe that reproduced the reference bidirectional result
+(\S\ref{sec:eth3d-repro-closed}); the mixer is the only difference between the three student
+rows. Scored on the twelve held-out \texttt{terrains} views, median-aligned per image, single
+seed per row.
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+mixer & abs.\ rel.$\downarrow$ & RMSE (m)$\downarrow$ & $\log_{10}\downarrow$ & $\delta{<}1.25\uparrow$ \\
+\midrule
+softmax (DA3-SMALL), zero-shot & $\mathbf{0.0323}$ & $\mathbf{0.0605}$ & $\mathbf{0.0141}$ & $\mathbf{1.0000}$ \\
+\midrule
+bidirectional        & $0.0550$ & $0.1034$ & $0.0239$ & $0.9991$ \\
+VSSD-$\gamma$        & \textsc{running} & \textsc{running} & \textsc{running} & \textsc{running} \\
+VSSD-$\beta,\gamma$  & \textsc{running} & \textsc{running} & \textsc{running} & \textsc{running} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Status.} The two VSSD arms are queued on this recipe and are \emph{not} yet measured;
+the numbers previously carried for them ($0.0804$ and $0.0656$) came from the ten-image sampling
+era and are superseded, so they are deliberately not shown here rather than shown with a
+footnote. Do not quote this table until both rows are filled.
+
+\paragraph{What the DA3-SMALL row is, and is not.} It is DA3's own two-stream features at the
+same four export layers through the same DualDPT head, zero-shot, with no ETH3D training of any
+kind. Two other numbers can be produced for this baseline and neither belongs here: $0.0453$
+widens the single-stream auxiliary features by duplication, which discards DA3's second stream
+and measures a crippled DA3; $0.0417$ is DA3's packaged multi-view \texttt{inference()}, which
+selects a reference view and estimates cameras and so does not isolate the mixer at all.
+
+\paragraph{The rows did not receive the same training, and the comparison is not controlled.}
+DA3-SMALL is zero-shot; every student row had a mixer distilled, a bridge trained and the depth
+head fine-tuned on ETH3D, which is why their $\delta{<}1.25$ is higher. Conversely DA3-SMALL
+carries the whole of DA3's pretraining corpus while the students are randomly initialised in
+their attention layers and trained on $374$ images. The claim the table supports is narrow: a
+non-causal state-space mixer \emph{can} be substituted for softmax self-attention inside an
+already-pretrained depth pipeline, at a cost. It does not rank the backbones.
+
 \subsection{What this repository provides}
 \label{sec:eth3d-depth-harness}
 
