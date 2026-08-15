@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 # Regenerate result/depth/spread.json for the paper's Table A.3.
 #
-# Table A.3 does NOT use result.json. Every row in it comes from measure_depth_spread.py, which
-# re-scores all arms through one evaluator and also reports the per-view standard deviation the
-# caption quotes. The two paths disagree substantially -- bidirectional is 0.0550 in result.json
-# and 0.0791 in spread.json -- so the numbers must never be mixed between them.
+# Table A.3's rows come from measure_depth_spread.py, not from each run's result.json. The two are
+# the SAME computation -- same scene, img_size 504, max_images 12, the same ft1000/ckpt.pt path and
+# the same depth_metrics call; per_image=True only adds the per-view lists. measure_depth_spread
+# exists because it puts DA3-SMALL and all three students through one process in one run, which is
+# what makes the table's rows comparable, and because it reports the per-view standard deviation
+# the caption quotes.
+#
+# So the 0.0791 that spread.json holds for bidirectional against result.json's 0.0550 is NOT an
+# evaluator disagreement. It is staleness: spread.json scored whatever file sat at that path on
+# 2026-08-13, and the retrains have overwritten all three since.
 #
 # The spread.json on disk was written 2026-08-13 09:20, before all three current checkpoints
 # (bidirectional 08-14 19:55, vssd 08-15 13:52, vssd_bg 08-15 16:30), so it describes superseded
