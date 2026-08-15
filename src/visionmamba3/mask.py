@@ -187,8 +187,23 @@ def build_cross_mask(delta_kv: Tensor, A_log_kv: Tensor, T_q: int, bidirectional
     Returns:
         L_cross of shape (..., T_q, T_kv)
     """
-    assert delta_kv.shape == A_log_kv.shape
     T_kv = delta_kv.shape[-1]
+    col_vec = build_cross_scale(delta_kv, A_log_kv, bidirectional=bidirectional)
+    return col_vec.unsqueeze(-2).expand(*col_vec.shape[:-1], T_q, T_kv).contiguous()
+
+
+def build_cross_scale(delta_kv: Tensor, A_log_kv: Tensor, bidirectional: bool = False) -> Tensor:
+    """The per-kv-token weighting vector m, of shape (..., T_kv).
+
+    This is the mask. ``build_cross_mask`` only takes this vector and expands it across the query
+    axis, because a path that multiplies a full T_q x T_kv array needs an array to multiply; the
+    weighting itself never depends on the query index. Anything that can consume the vector
+    directly should call this and stay linear in T.
+
+        unidirectional:  m_j = γ_j · ∏_{k=j+1..T_kv} α_k
+        bidirectional:   m_j = γ_j · [∏_{k=j+1..T_kv} α_k + ∏_{k=1..j-1} α_k]
+    """
+    assert delta_kv.shape == A_log_kv.shape
     log_alpha = delta_kv * A_log_kv
     gamma = delta_kv  # γ_j = Δ_j  (two-term form)
 
@@ -196,12 +211,8 @@ def build_cross_mask(delta_kv: Tensor, A_log_kv: Tensor, T_q: int, bidirectional
     S_total = S[..., -1:]
     fwd = (S_total - S).exp()  # ∏_{k=j+1..T_kv} α_k
 
-    if bidirectional:
-        # ∏_{k=1..j-1} α_k = exp(S_{j-1}) with S_0 := 0
-        S_prev = torch.nn.functional.pad(S[..., :-1], (1, 0), value=0.0)
-        rev = S_prev.exp()
-        col_vec = gamma * (fwd + rev)
-    else:
-        col_vec = gamma * fwd
-
-    return col_vec.unsqueeze(-2).expand(*col_vec.shape[:-1], T_q, T_kv).contiguous()
+    if not bidirectional:
+        return gamma * fwd
+    # ∏_{k=1..j-1} α_k = exp(S_{j-1}) with S_0 := 0
+    S_prev = torch.nn.functional.pad(S[..., :-1], (1, 0), value=0.0)
+    return gamma * (fwd + S_prev.exp())

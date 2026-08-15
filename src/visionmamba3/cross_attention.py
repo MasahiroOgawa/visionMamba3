@@ -24,8 +24,15 @@ from typing import Optional
 import torch
 from torch import Tensor, nn
 
-from .mask import build_cross_mask
+from .mask import build_cross_mask, build_cross_scale
 from .projections import AttentionProjections
+
+
+COLLAPSE = "collapse"
+TOKEN_LEVEL_TEST_ONLY = "OnlyForCodingCorrectnessTestTokenLevelPathOrderTSquare"
+# Legacy one-letter names. They said nothing about what either path does, and "B" -- the O(T^2)
+# one -- used to be the default, which is how the tracker came to run it at every refiner site.
+_VARIANT_ALIASES = {"A": COLLAPSE, "B": TOKEN_LEVEL_TEST_ONLY}
 
 
 class Mamba3CrossAttention(nn.Module):
@@ -35,7 +42,12 @@ class Mamba3CrossAttention(nn.Module):
         dim_q, dim_kv:  feature dims of query and kv token streams
         num_heads:      heads; both dims must be divisible by H
         state_dim:      N_state per head
-        variant:        'A' (state-compressed) or 'B' (token-level / default)
+        variant:        COLLAPSE (default) pools the keys into an (N, head_dim) state and reads
+                        it with C -- eq. (4) as written, linear in T. TOKEN_LEVEL_TEST_ONLY
+                        instead materialises the full T_q x T_kv similarity and multiplies it by
+                        the expanded mask; it computes the same function at O(T^2) cost and
+                        exists only to check the collapse against a direct transcription of the
+                        formula. "A"/"B" are accepted as legacy aliases.
         out_proj:       apply output linear if True
         two_pool:       add a second, independently-read pool (VSSD-beta,gamma). Variant B's
                         mask is rank-1 across the query axis -- every query row of L_cross is
@@ -55,7 +67,7 @@ class Mamba3CrossAttention(nn.Module):
         dim_kv: int,
         num_heads: int = 8,
         state_dim: int = 64,
-        variant: str = "B",
+        variant: str = COLLAPSE,
         out_proj: bool = True,
         proj_bias: bool = True,
         bidirectional_mask: bool = False,
@@ -63,9 +75,10 @@ class Mamba3CrossAttention(nn.Module):
         chunk_size: int | None = None,
     ) -> None:
         super().__init__()
-        assert variant in ("A", "B")
-        if two_pool and variant not in ("A", "B"):
-            raise ValueError("two_pool is defined for variants A and B")
+        variant = _VARIANT_ALIASES.get(variant, variant)
+        assert variant in (COLLAPSE, TOKEN_LEVEL_TEST_ONLY), (
+            f"variant must be {COLLAPSE!r} or {TOKEN_LEVEL_TEST_ONLY!r}, got {variant!r}")
+
         assert dim_q % num_heads == 0 and dim_kv % num_heads == 0
 
         self.dim_q = dim_q
@@ -147,7 +160,7 @@ class Mamba3CrossAttention(nn.Module):
         if rope is not None and kv_pos is not None:
             Bkv = rope(Bkv, kv_pos)
 
-        if self.variant == "B":
+        if self.variant == TOKEN_LEVEL_TEST_ONLY:
             Cq2 = None
             if self.two_pool:
                 _b2, Cq2, _v2, _d2, _a2, _l2, _ang2 = self.q_proj2(q_tokens)
@@ -208,13 +221,9 @@ class Mamba3CrossAttention(nn.Module):
         Cq2: Optional[Tensor] = None,
         kv_tokens: Optional[Tensor] = None,
     ) -> Tensor | tuple[Tensor, Tensor]:
-        # Build the per-kv-token scale vector
-        log_alpha = delta_kv * A_log_kv  # (B, H, T_kv)
-        log_gamma = torch.log(delta_kv.clamp_min(1e-20))
-        S = torch.cumsum(log_alpha, dim=-1)
-        S_total = S[..., -1:]
-        log_col = log_gamma + (S_total - S)
-        scale = log_col.exp()  # (B, H, T_kv)
+        # The same vector the token-level path expands into a matrix -- one source of truth, so
+        # the two paths cannot drift apart, and bidirectional is just the symmetric m.
+        scale = build_cross_scale(delta_kv, A_log_kv, bidirectional=self.bidirectional_mask)
 
         # h_ref = Σ_j scale_j · B_j · V_jᵀ   ∈  (B, H, N, head_dim_kv)
         B_scaled = Bkv * scale.unsqueeze(-1)  # (B, H, T_kv, N)
