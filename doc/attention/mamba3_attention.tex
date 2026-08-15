@@ -3839,7 +3839,7 @@ CIFAR-10 shows VSSD-2pool's benefit concentrated at long sequence length
 operator was built for.
 
 \paragraph{What was swapped.} The tracker's refiner mixes each track over time with
-\texttt{Mamba3CrossAttention(variant="B")}, whose mask
+\texttt{Mamba3CrossAttention} on its collapse path, whose mask
 $L[i,j] = \gamma_j \prod_{k=j+1}^{T}\alpha_k$ keeps only the $\gamma$ band and is \emph{rank-1
 across the query axis} --- every query row is identical, so one pool applies the same weighting
 over the track to every frame. The two-pool construction adds a second, independently-read pool

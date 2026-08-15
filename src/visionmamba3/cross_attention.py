@@ -30,11 +30,6 @@ from .projections import AttentionProjections
 
 COLLAPSE = "collapse"
 TOKEN_LEVEL_TEST_ONLY = "OnlyForCodingCorrectnessTestTokenLevelPathOrderTSquare"
-# Legacy one-letter names. They said nothing about what either path does, and "B" -- the O(T^2)
-# one -- used to be the default, which is how the tracker came to run it at every refiner site.
-_VARIANT_ALIASES = {"A": COLLAPSE, "B": TOKEN_LEVEL_TEST_ONLY}
-
-
 class Mamba3CrossAttention(nn.Module):
     """Cross-attention where query and kv come from different token streams.
 
@@ -47,7 +42,7 @@ class Mamba3CrossAttention(nn.Module):
                         instead materialises the full T_q x T_kv similarity and multiplies it by
                         the expanded mask; it computes the same function at O(T^2) cost and
                         exists only to check the collapse against a direct transcription of the
-                        formula. "A"/"B" are accepted as legacy aliases.
+                        formula.
         out_proj:       apply output linear if True
         two_pool:       add a second, independently-read pool (VSSD-beta,gamma). Variant B's
                         mask is rank-1 across the query axis -- every query row of L_cross is
@@ -75,7 +70,6 @@ class Mamba3CrossAttention(nn.Module):
         chunk_size: int | None = None,
     ) -> None:
         super().__init__()
-        variant = _VARIANT_ALIASES.get(variant, variant)
         assert variant in (COLLAPSE, TOKEN_LEVEL_TEST_ONLY), (
             f"variant must be {COLLAPSE!r} or {TOKEN_LEVEL_TEST_ONLY!r}, got {variant!r}")
 
