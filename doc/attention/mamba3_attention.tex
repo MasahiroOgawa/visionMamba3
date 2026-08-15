@@ -3652,6 +3652,96 @@ channels and the image-gradient mean was taken over all of them at once, then br
 every image; broadcasting accepted the wrong shape silently instead of raising. It is fixed, with
 an assertion on the shape, and the $0.0933$ measurement that used it is void.
 
+\subsection{The reproduction closes: $0.0531 \to 0.0550$, and what the five causes were}
+\label{sec:eth3d-repro-closed}
+
+Measured 2026-08-15. The gap to the retired repository's $0.0531$ is now $0.0019$, against a
+per-view standard deviation of $0.0141$ on the same twelve views --- seven times smaller than the
+noise the scene can resolve. On $\delta{<}1.25$ this repository is now \emph{ahead} of the
+reference ($0.9991$ against $0.9972$).
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+configuration & abs.\ rel. & $\delta{<}1.25$ \\
+\midrule
+reference path, no LR floor, no augmentation & $0.0833$ & --- \\
+$+$ \texttt{eta\_min} LR floor                & $0.0791$ & $0.954$ \\
+$+$ the reference's augmentation              & $0.0698$ & $0.984$ \\
+$+$ all ten training scenes (was eight)       & $0.0711$ & $0.977$ \\
+$+$ all $374$ images (was ten)                & $0.0619$ & $0.981$ \\
+$+$ uniform sampling over images              & $\mathbf{0.0550}$ & $\mathbf{0.9991}$ \\
+\midrule
+reference (\texttt{ssm3d} CM22)               & $0.0531$ & $0.9972$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{The five causes, in the order found.} Every one was a place where a comment in this
+repository asserted something about the reference that the reference's own run script contradicts.
+The lesson is mechanical: diff against the other implementation's \emph{code}, not against our
+description of it.
+
+\begin{enumerate}
+  \item \textbf{Augmentation was never switched on.} \texttt{run\_depth\_variant.sh} carried the
+    comment ``the reference cfg has no augment field'', read off a config file, while the
+    reference's runner passes \texttt{--augment} on the command line. Every run before 2026-08-13
+    trained the final $1000$-step stage bare.
+  \item \textbf{Our augmentation was a strict subset.} Crop only, over $(0.7, 1.0)$. The reference
+    crops over $(0.6, 1.0)$, flips horizontally with $p=0.5$, and jitters
+    brightness/contrast/saturation in $[0.6, 1.4]$ with hue in $\pm0.1$.
+  \item \textbf{Two of ten scenes were withheld for nothing.} \texttt{relief\_2} and
+    \texttt{electro} sat in \texttt{VAL\_SCENES} behind a comment claiming they drove early
+    stopping. Nothing read them. This one turned out not to matter ($0.0698 \to 0.0711$, inside
+    the noise) --- because it added two \emph{images}, not two scenes' worth.
+  \item \textbf{Training saw ten images, not $374$.} \texttt{load\_scene} selected views as
+    \texttt{sorted(rglob("*.JPG"))[:max\_images]} and the runner passes \texttt{--n-views 1}, so
+    every step of every phase loaded the alphabetically first photograph of whichever scene it
+    drew. The reference enumerates all images with no slice. This was the largest single cause,
+    and it reframes (2): augmentation gave such a large gain because crop/flip/jitter was the only
+    source of variety in a ten-image training set.
+  \item \textbf{Sampling was skewed $5.4\times$.} The first fix drew a scene uniformly and then an
+    image inside it. The scenes hold between $14$ and $76$ images, so a \texttt{pipes} image was
+    $2.67\times$ likelier than uniform and a \texttt{facade} image $0.49\times$. The reference
+    shuffles a flat list of all images. Worth $0.0619 \to 0.0550$.
+\end{enumerate}
+
+\paragraph{Eliminated by measurement, so they are not re-investigated.} Chunked mask construction
+(memory-only; the same mask in row blocks), the Phase-C knowledge-distillation term (defaults to
+$0$ and is never passed), patch size, image size, step counts, per-stage learning rates, the
+\texttt{ft500}$\to$\texttt{ft1000} initialisation chain, the distilled layers $(5,7,9,11)$, the
+loss form and its per-layer averaging, the student-side projector (inert for a DA3-SMALL teacher),
+\texttt{bf16} autocast in both phases, and ground-truth depth resampling (\textsc{nearest} for
+depth, \textsc{bilinear} for RGB). The reference additionally drops one patch token from the
+distillation loss that we keep --- one token of $1296$, not a cause.
+
+\paragraph{Two caveats about the target itself, which matter more than the residual $0.0019$.}
+First, $0.0531$ was \emph{selected on the test scene}: \texttt{PLAN.md} records $25$
+countermeasures, each scored on held-out \texttt{terrains} and kept or reverted on that score,
+then checkpoints at $250/500/1000$ compared on the same scene with ``@1000 is the strict best on
+all four depth metrics''. It is therefore a maximum over roughly $28$ evaluations against the
+twelve views used to report it, and is optimistically biased by an unknown amount. Second, those
+twelve views are not representative of the scene. \texttt{terrains} holds $42$; both
+implementations score the first twelve in alphabetical order, and those twelve are much easier:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+ & 12 views (as reported) & all 42 views \\
+\midrule
+DA3-SMALL      & $0.0321$ & $0.0486$ \\
+bidirectional  & $0.0619$ & $0.1552$ \\
+ratio          & $1.93\times$ & $\mathbf{3.20\times}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The subset flatters the state-space student specifically: its error triples on the full
+scene while DA3-SMALL's rises by half, and its across-view spread is four times DA3's. Any claim
+of the form ``roughly twice DA3-SMALL's error'' is a property of those twelve views, not of the
+scene. (Measured on the $0.0619$ checkpoint, before the sampling fix; the ratio should be
+re-measured on the current one before it is quoted.)
+
 \subsection{What this repository provides}
 \label{sec:eth3d-depth-harness}
 
@@ -3683,6 +3773,65 @@ updated operator (2-D RoPE, fused Triton kernel, pinned upstream submodule)
 rather than the 2026-04 snapshot that produced the legacy numbers above.
 
 %% ================================================================
+\section{Application 5: VSSD-$\beta,\gamma$ in the 3D point-tracking refiner}
+\label{sec:vssd-bg-tracking}
+
+CIFAR-10 shows VSSD-$\beta,\gamma$'s benefit concentrated at long sequence length
+(\S\ref{sec:rotary-vssd}). This experiment asks whether it transfers to the application the
+operator was built for.
+
+\paragraph{What was swapped.} The tracker's refiner mixes each track over time with
+\texttt{Mamba3CrossAttention(variant="B")}, whose mask
+$L[i,j] = \gamma_j \prod_{k=j+1}^{T}\alpha_k$ keeps only the $\gamma$ band and is \emph{rank-1
+across the query axis} --- every query row is identical, so one pool applies the same weighting
+over the track to every frame. The two-pool construction adds a second, independently-read pool
+with its own query projection $C^{(2)}$ and its own per-token vector $m^{(2)}$, which lifts that
+restriction. Its contribution is scaled by a parameter initialised to zero, so a two-pool layer is
+numerically identical to a one-pool layer at initialisation (verified: $\max|\Delta| = 0$).
+
+\paragraph{Cold start, not warm start.} Fine-tuning the two-pool model from the published
+one-pool checkpoint is cheaper and confounded: it would have seen $20000$ one-pool steps
+\emph{plus} the fine-tune, against the baseline's $20000$, so a gain could be the extra training.
+Both arms therefore train from scratch for $20000$ steps with identical configuration and data,
+\texttt{two\_pool} the only difference.
+
+\paragraph{Result (DA3-l arm, 2026-08-15).} It does not help.
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+mean metric-AJ & drivetrack & pstudio & adt & mean \\
+\midrule
+WAFT$+$DA3-l$+$vmamba3 (one pool) & $0.141$ & $0.279$ & $0.318$ & $0.246$ \\
+$+$ VSSD-$\beta,\gamma$ (two pool) & $0.135$ & $0.271$ & $0.259$ & $0.222$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Lower on all three subsets, with the loss concentrated in \texttt{adt}. The second pool
+also costs $0.442 \to 0.612$\,M trainable parameters ($+38\%$), so it is not free even where it is
+neutral.
+
+\paragraph{The comparison is not yet airtight, and should not be quoted until it is.} The $0.246$
+baseline was produced in a \emph{different repository}. Partial-subset summaries of the same
+configuration inside the tracker repository reconstruct to roughly $0.226$, which is close enough
+to the two-pool $0.222$ that ``the second pool hurts'' and ``this repository's baseline is
+$0.226$'' cannot yet be separated. The control that settles it is the one-pool configuration
+trained in this repository under exactly the protocol above. Until that runs, the defensible
+statement is that VSSD-$\beta,\gamma$ \emph{does not improve} metric-AJ here, not that it degrades
+it.
+
+\paragraph{2-D RoPE was deliberately not applied.} It is the best CIFAR-10 pairing for this
+operator, but its angle is $\theta^{\mathrm{row}}[n]\,r + \theta^{\mathrm{col}}[n]\,c$, a function
+of a patch's row and column on an image grid. This mixer runs over a track's \emph{time} axis,
+which has neither. Nor would the pinned rotary of \S\ref{sec:rotary-vssd} apply: variant B
+forms $C^q B^{kv\top}$ pairwise before the mask, so the absolute angles cancel and no pooled sum
+exists to decohere --- the failure that pinning repairs cannot occur here. Pinning would also
+normalise by sequence length, which is actively wrong when training uses $8$-frame windows and
+inference uses clips of hundreds of frames: at $n=0.25$ the adjacent-frame angle is $11.3^\circ$
+at $T{=}8$ and $0.30^\circ$ at $T{=}300$. The principled variant to try instead is an
+\emph{unpinned} $1$-D temporal rotary, whose per-frame increment is independent of $T$.
+
 \section{Note: bilinear flow chaining for 2-D tracks}\label{sec:flow-chaining}
 
 This section is a scope exception. Everything above concerns the Mamba-3 operator
