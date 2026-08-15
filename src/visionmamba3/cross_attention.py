@@ -60,6 +60,7 @@ class Mamba3CrossAttention(nn.Module):
         proj_bias: bool = True,
         bidirectional_mask: bool = False,
         two_pool: bool = False,
+        chunk_size: int | None = None,
     ) -> None:
         super().__init__()
         assert variant in ("A", "B")
@@ -76,6 +77,12 @@ class Mamba3CrossAttention(nn.Module):
         self.head_dim_kv = dim_kv // num_heads
 
         self.two_pool = two_pool
+        # Variant B materialises (B, H, T_q, T_kv) tensors -- L, sim, and with two_pool a second
+        # sim -- so peak memory grows with batch x T^2. At TAPVid-3D's adt shape (849 tracks,
+        # T=300) one of them is already 2.4 GB, and the second pool's 1.58x pushed a 12 GB card
+        # over. Batch elements are independent here (BCNorm is per-head RMSNorm; nothing reduces
+        # across dim 0), so slicing the batch is exact, not an approximation.
+        self.chunk_size = chunk_size
         self.q_proj = AttentionProjections(dim_q, num_heads, state_dim)
         self.kv_proj = AttentionProjections(dim_kv, num_heads, state_dim)
         if two_pool:
@@ -114,6 +121,22 @@ class Mamba3CrossAttention(nn.Module):
         Returns:
             y: (B, T_q, dim_q) and optionally the attention map.
         """
+        if self.chunk_size and q_tokens.shape[0] > self.chunk_size:
+            outs, attns = [], []
+            for i in range(0, q_tokens.shape[0], self.chunk_size):
+                sl = slice(i, i + self.chunk_size)
+                r = self.forward(
+                    q_tokens[sl], kv_tokens[sl],
+                    None if q_pos is None else q_pos[sl],
+                    None if kv_pos is None else kv_pos[sl],
+                    rope, return_attn)
+                if return_attn:
+                    outs.append(r[0]); attns.append(r[1])
+                else:
+                    outs.append(r)
+            y = torch.cat(outs, dim=0)
+            return (y, torch.cat(attns, dim=0)) if return_attn else y
+
         # Queries: we only use C^q and (for variant B) the full decay isn't
         # applied on the query side.
         _Bq_unused, Cq, _Vq_unused, _dq, _Aq, _lq, _angq = self.q_proj(q_tokens)
