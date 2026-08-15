@@ -3759,16 +3759,31 @@ mixer & abs.\ rel.$\downarrow$ & RMSE (m)$\downarrow$ & $\log_{10}\downarrow$ & 
 softmax (DA3-SMALL), zero-shot & $\mathbf{0.0323}$ & $\mathbf{0.0605}$ & $\mathbf{0.0141}$ & $\mathbf{1.0000}$ \\
 \midrule
 bidirectional        & $0.0550$ & $0.1034$ & $0.0239$ & $0.9991$ \\
-VSSD-1pool        & \textsc{running} & \textsc{running} & \textsc{running} & \textsc{running} \\
-VSSD-2pool  & \textsc{running} & \textsc{running} & \textsc{running} & \textsc{running} \\
+VSSD-1pool           & $0.0595$ & $0.1181$ & $0.0263$ & $0.9764$ \\
+VSSD-2pool           & \underline{$0.0511$} & \underline{$0.1005$} & \underline{$0.0223$} & $0.9957$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\paragraph{Status.} The two VSSD arms are queued on this recipe and are \emph{not} yet measured;
-the numbers previously carried for them ($0.0804$ and $0.0656$) came from the ten-image sampling
-era and are superseded, so they are deliberately not shown here rather than shown with a
-footnote. Do not quote this table until both rows are filled.
+\paragraph{Status: complete.} All four rows are measured on this recipe (bidirectional
+2026-08-14, VSSD-1pool and VSSD-2pool 2026-08-15). The numbers these two arms previously carried
+($0.0804$ and $0.0656$) came from the ten-image sampling era and are superseded. Bold marks the
+best value in each column; underline marks the best of the three student rows, which is a
+separate comparison because DA3-SMALL is zero-shot.
+
+\paragraph{What the student rows show.} VSSD-2pool is the best of the three on abs.\ rel., RMSE and
+$\log_{10}$, and is the only arm to come in under the retired repository's $0.0531$;
+bidirectional retains the best inlier rate,
+$\delta{<}1.25=0.9991$ against VSSD-2pool's $0.9957$. VSSD-1pool is last on all four, which is
+what \S\ref{sec:no-distance-bias} predicts: its single query-independent vector cannot represent a
+distance bias, so it loses the $|i-j|$ decay the bidirectional mask keeps, and the second pool is
+what buys that capacity back. Three caveats bound this. Each row is one seed with no repeat spread,
+and the across-view standard deviation within a row is of the same order as the gaps between rows;
+and \S\ref{sec:eth3d-repro-closed} records two more, that the $0.0531$ reference was itself
+selected on this scene across roughly $28$ evaluations and that the twelve views are not
+representative of \texttt{terrains}. The
+ordering of the three students on this scene is therefore a measurement, not a ranking of the
+operators.
 
 \paragraph{What the DA3-SMALL row is, and is not.} It is DA3's own two-stream features at the
 same four export layers through the same DualDPT head, zero-shot, with no ETH3D training of any
