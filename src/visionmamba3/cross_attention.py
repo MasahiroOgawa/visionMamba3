@@ -64,8 +64,8 @@ class Mamba3CrossAttention(nn.Module):
     ) -> None:
         super().__init__()
         assert variant in ("A", "B")
-        if two_pool and variant != "B":
-            raise ValueError("two_pool is defined for variant B only")
+        if two_pool and variant not in ("A", "B"):
+            raise ValueError("two_pool is defined for variants A and B")
         assert dim_q % num_heads == 0 and dim_kv % num_heads == 0
 
         self.dim_q = dim_q
@@ -155,7 +155,13 @@ class Mamba3CrossAttention(nn.Module):
                     Cq2 = rope(Cq2, q_pos)
             return self._variant_b(Cq, Bkv, Vkv, dkv, Akv, return_attn,
                                    Cq2=Cq2, kv_tokens=kv_tokens)
-        return self._variant_a(Cq, Bkv, Vkv, dkv, Akv, return_attn)
+        Cq2 = None
+        if self.two_pool:
+            _b2, Cq2, _v2, _d2, _a2, _l2, _ang2 = self.q_proj2(q_tokens)
+            if rope is not None and q_pos is not None:
+                Cq2 = rope(Cq2, q_pos)
+        return self._variant_a(Cq, Bkv, Vkv, dkv, Akv, return_attn,
+                               Cq2=Cq2, kv_tokens=kv_tokens)
 
     def _variant_b(
         self,
@@ -199,6 +205,8 @@ class Mamba3CrossAttention(nn.Module):
         delta_kv: Tensor,
         A_log_kv: Tensor,
         return_attn: bool,
+        Cq2: Optional[Tensor] = None,
+        kv_tokens: Optional[Tensor] = None,
     ) -> Tensor | tuple[Tensor, Tensor]:
         # Build the per-kv-token scale vector
         log_alpha = delta_kv * A_log_kv  # (B, H, T_kv)
@@ -215,6 +223,16 @@ class Mamba3CrossAttention(nn.Module):
 
         # y_i = Cq_i · h_ref   ∈ (B, H, T_q, head_dim_kv)
         y = torch.einsum("bhqn,bhnd->bhqd", Cq, h_ref)
+
+        if Cq2 is not None and kv_tokens is not None:
+            # The second pool in the same collapsed form: its own per-token vector m^(2) pools the
+            # same keys into a second (N, head_dim) state, read by its own query projection. Two
+            # pooled states, each O(ND) and independent of T -- which is the whole point of the
+            # construction, and what the token-level path throws away by materialising T_q x T_kv.
+            m2 = nn.functional.softplus(self.m2(kv_tokens))        # (B, T_kv, H)
+            m2 = m2.permute(0, 2, 1)                               # (B, H, T_kv)
+            h2 = torch.einsum("bhtn,bhtd->bhnd", Bkv * m2.unsqueeze(-1), Vkv)
+            y = y + self.pool2_gate * torch.einsum("bhqn,bhnd->bhqd", Cq2, h2)
 
         Bsz, H, Tq, hd = y.shape
         y = y.transpose(1, 2).contiguous().view(Bsz, Tq, H * hd)
