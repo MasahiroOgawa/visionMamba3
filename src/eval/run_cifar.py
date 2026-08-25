@@ -153,6 +153,10 @@ def write_results_json(out: Path, results: dict, args) -> None:
         "patch_size": args.patch_size, "eff_batch": args.eff_batch, "rope": args.rope,
         "fused": args.fused, "amp": args.amp,
         "rope_angles": args.rope_angles,
+        # Recorded because the turn count is the whole point of the pinned-rotary rows and was
+        # previously recoverable only from the output directory's name.
+        "rope_turns": args.rope_turns,
+        "rope_angle_scale": args.rope_angle_scale,
     }
     if args.lr_schedule == "plateau":
         cfg.update({
