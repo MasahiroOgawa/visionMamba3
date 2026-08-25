@@ -113,19 +113,19 @@ ROWS = [
     # that does not occur there.
     (r"VSSD-1pool", NONE, "vit_mamba3_vssd", "vm3_ablation_patch4_norope", "vm3_t1025_norope"),
     (r"VSSD-1pool", ROT, "vit_mamba3_vssd", "vm3_ablation_patch4_norope_rotary", "vm3_t1025_rotary"),
-    (r"VSSD-1pool", ROT1, "vit_mamba3_vssd", "", "vm3_t1025_turns1_vssd"),
+    (r"VSSD-1pool", ROT1, "vit_mamba3_vssd", "vm3_t65_turns1_vssd", "vm3_t1025_turns1_vssd"),
     (r"VSSD-1pool", ROPE, "vit_mamba3_vssd", "vm3_ropeonly_recheck", "vm3_t1025_rope"),
     (r"VSSD-1pool", BOTH, "vit_mamba3_vssd", "vm3_interleaved_vit_mamba3_vssd", "vm3_t1025_rope_rotary"),
-    (r"VSSD-1pool", BOTH1, "vit_mamba3_vssd", "", "vm3_t1025_turns1_rope_vssd"),
+    (r"VSSD-1pool", BOTH1, "vit_mamba3_vssd", "vm3_t65_turns1_rope_vssd", "vm3_t1025_turns1_rope_vssd"),
 
     # VSSD-2pool: its own dirs, because it was added after the first sweep and
     # is not parameter-matched with the rows above (2.93 M vs 2.71 M).
     (r"VSSD-2pool", NONE, "vit_mamba3_vssd_bg", "vm3_vssdbg_norope", "vm3_t1025_vssdbg_norope"),
     (r"VSSD-2pool", ROT, "vit_mamba3_vssd_bg", "vm3_vssdbg_norope_rotary", "vm3_t1025_vssdbg_rotary"),
-    (r"VSSD-2pool", ROT1, "vit_mamba3_vssd_bg", "", "vm3_t1025_turns1_vssdbg"),
+    (r"VSSD-2pool", ROT1, "vit_mamba3_vssd_bg", "vm3_t65_turns1_vssdbg", "vm3_t1025_turns1_vssdbg"),
     (r"VSSD-2pool", ROPE, "vit_mamba3_vssd_bg", "vm3_vssdbg_rope", "vm3_t1025_vssdbg_rope"),
     (r"VSSD-2pool", BOTH, "vit_mamba3_vssd_bg", "vm3_vssdbg_rope_rotary", "vm3_t1025_vssdbg_rope_rotary"),
-    (r"VSSD-2pool", BOTH1, "vit_mamba3_vssd_bg", "", "vm3_t1025_turns1_rope_vssdbg"),
+    (r"VSSD-2pool", BOTH1, "vit_mamba3_vssd_bg", "vm3_t65_turns1_rope_vssdbg", "vm3_t1025_turns1_rope_vssdbg"),
 ]
 
 # A fixed-turn rotary is the same architecture as the accumulating one -- only theta's
