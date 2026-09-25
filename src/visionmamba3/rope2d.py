@@ -68,7 +68,23 @@ class RoPE2D(nn.Module):
         assert tokens.size(-1) % 4 == 0, "feature dim must be divisible by 4"
         assert positions.ndim == 3 and positions.size(-1) == 2
 
-        max_pos = int(positions.max().item()) + 1
+        # Table capacity from the SHAPE, never from the data. `positions` holds patch
+        # coordinates of a gh x gw grid, so every coordinate is < max(gh, gw) <= gh*gw = T
+        # -- the token count is always a valid upper bound, and reading it costs nothing.
+        #
+        # This used to be `int(positions.max().item()) + 1`, a blocking GPU->CPU
+        # synchronisation on every single call. Under gradient checkpointing that sync
+        # runs again during recomputation, which happens on the AUTOGRAD ENGINE'S BACKWARD
+        # THREAD, and there it hung: a U4DR-G run stopped dead at step 230 with all 56
+        # CPU threads asleep in futex_do_wait, the GPU reporting 100% utilisation and
+        # allocated memory flat to the byte. The faulthandler stack put the backward
+        # thread exactly on that `.item()`. It reproduced three times, at two different
+        # memory footprints (9514 MiB and 8002 MiB), which is what ruled out the
+        # allocator explanation it was first blamed on.
+        #
+        # Removing it is a strict win regardless of the hang: a device sync per RoPE call
+        # serialises the whole pipeline, and these run once per block per layer.
+        max_pos = positions.size(-2)
         # Each half (row-encoded, column-encoded) contributes d/4 rotation planes.
         cos, sin = self._freqs(
             tokens.size(-1) // 4, max_pos, tokens.device, tokens.dtype
