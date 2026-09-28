@@ -63,7 +63,7 @@ visionMamba3/
 │       ├── da3.py             #   loading Depth-Anything-3 and driving its DPT head
 │       ├── eth3d.py           #   ETH3D loader and the fixed scene split
 │       └── metrics.py         #   depth metrics (median-aligned)
-├── scripts/                   # job queues, sweeps, table/plot generation, cudnn_env.sh
+├── scripts/                   # dataset download, job queues, sweeps, table/plot generation, cudnn_env.sh
 ├── tests/unit/                # pytest suite for the library and loaders
 ├── doc/
 │   ├── attention/             # paper: mamba3_attention.tex (+ generated table/plot)
@@ -72,7 +72,7 @@ visionMamba3/
 ├── third_party/               # git submodules (official upstream, pinned)
 │   ├── mamba-ssm/             #   state-spaces/mamba — Triton SSD kernels
 │   └── depth-anything-3/      #   ByteDance-Seed/Depth-Anything-3 — teacher + DPT head
-├── data/                      # datasets (not tracked)
+├── data/                      # datasets, fetched by scripts/download_data.py (not tracked)
 ├── result/, runs/             # experiment outputs (not tracked)
 └── pyproject.toml, uv.lock
 ```
@@ -96,31 +96,10 @@ cd visionMamba3
 git submodule update --init --recursive
 
 uv sync                          # library + dev tools
-uv sync --extra eval             # + CIFAR-10 experiment (torchvision, pyyaml, matplotlib)
-uv sync --extra eval --extra depth   # + ETH3D depth experiment (timm, opencv, safetensors, ...)
 ```
 
-Before GPU jobs, source the cuDNN helper. If a system-wide cuDNN is installed and shadows the one
-bundled with torch, convolutions fail with `CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH`; the script
-detects the system version and puts a matching complete cuDNN first on the loader path (it prints
-how to fetch one if it is missing):
-
-```bash
-source scripts/cudnn_env.sh
-```
-
-### Data
-
-Nothing is downloaded automatically.
-
-- **CIFAR-10** — the Python version under `data/cifar10/cifar-10-batches-py/`
-  (unpack `cifar-10-python.tar.gz` from https://www.cs.toronto.edu/~kriz/cifar.html).
-- **ETH3D** — the high-res multi-view DSLR scenes from https://www.eth3d.net/datasets, unpacked
-  per scene under `data/eth3d/<scene>/` (each with `images/` and `ground_truth_depth/`).
-  Training uses `courtyard, delivery_area, electro, facade, kicker, office, pipes, playground,
-  relief, relief_2`; `terrains` is the test scene.
-- The DA3-SMALL teacher (`depth-anything/DA3-SMALL`) is fetched from the Hugging Face Hub on first
-  use.
+This is all the library needs. The extra dependencies and datasets for reproducing the paper's
+experiments are covered in [5. Evaluation](#5-evaluation).
 
 ### Check the install
 
@@ -168,6 +147,52 @@ y = xattn(q_tokens, kv_tokens)         # (B, T_q, dim_q)
 
 Pass `use_fused_kernel=False` to `Mamba3SelfAttention` to use the PyTorch reference path (CPU or
 kernel debugging).
+
+## 5. Evaluation
+
+Reproducing the paper's experiments. None of this is needed to use the library.
+
+### Extra dependencies
+
+```bash
+uv sync --extra eval                 # CIFAR-10 experiment (torchvision, pyyaml, matplotlib)
+uv sync --extra eval --extra depth   # + ETH3D depth experiment (timm, opencv, safetensors, ...)
+```
+
+Before GPU jobs, source the cuDNN helper. If a system-wide cuDNN is installed and shadows the one
+bundled with torch, convolutions fail with `CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH`; the script
+detects the system version and puts a matching complete cuDNN first on the loader path (it prints
+how to fetch one if it is missing):
+
+```bash
+source scripts/cudnn_env.sh
+```
+
+### Datasets
+
+`scripts/download_data.py` **downloads** the datasets from their official hosts and unpacks them
+into `data/`, where the experiments look for them:
+
+```bash
+uv run python scripts/download_data.py cifar10                 # CIFAR-10, ~170 MB
+uv run --extra depth python scripts/download_data.py eth3d     # ETH3D, ~10.8 GB download, ~40 GB on disk
+uv run --extra depth python scripts/download_data.py           # both
+```
+
+| Dataset | Source | Unpacked to | Used by |
+|---|---|---|---|
+| CIFAR-10 (Python version) | https://www.cs.toronto.edu/~kriz/cifar.html | `data/cifar10/cifar-10-batches-py/` | CIFAR-10 operator comparison |
+| ETH3D high-res multi-view, DSLR undistorted images + ground-truth depth | https://www.eth3d.net/datasets | `data/eth3d/<scene>/` | ETH3D depth |
+
+- Anything already present is skipped, so an interrupted download can be restarted, and existing
+  data (including a symlinked `data/cifar10` or `data/eth3d`) is left untouched. Archives are
+  deleted once unpacked.
+- ETH3D ships as 7z archives and needs the `7z` binary (`sudo apt install p7zip-full`).
+- ETH3D scenes: `courtyard, delivery_area, electro, facade, kicker, office, pipes, playground,
+  relief, relief_2` train; `terrains` is the test scene and never trains.
+- Check each dataset's terms of use on its site before using it.
+- The DA3-SMALL teacher (`depth-anything/DA3-SMALL`) is not in `data/`: it is downloaded from the
+  Hugging Face Hub on first use.
 
 ### CIFAR-10 operator comparison
 
