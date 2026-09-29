@@ -1,7 +1,14 @@
 # visionMamba3
 
+[![arXiv](https://img.shields.io/badge/arXiv-2609.34035-b31b1b.svg)](https://arxiv.org/abs/2609.34035)
+
 Vision Mamba-3: attention modules for vision built on the **State Space Duality (SSD)** of
 Mamba-3, which was designed for text.
+
+This is the vmamba3 operator code of the paper
+**[3D Point Tracking with State Space Models](https://arxiv.org/abs/2609.34035)**
+(M. Ogawa, Q. An and A. Yamashita, arXiv:2609.34035, 2026). The 3D point-tracking application
+is in [vmamba3-3Dpointtracker](https://github.com/MasahiroOgawa/vmamba3-3Dpointtracker).
 
 ## 1. What is this repository
 
@@ -245,8 +252,23 @@ make -C doc/mamba3_derivation                  # mamba3_derivation.pdf
 
 The table script reads every number from the run directories, so a cell with no run prints `--`.
 
+## Citation
+
+If you use this code, please cite:
+
+```bibtex
+@article{ogawa2026pointtracking,
+  title   = {3D Point Tracking with State Space Models},
+  author  = {Ogawa, Masahiro and An, Qi and Yamashita, Atsushi},
+  journal = {arXiv preprint arXiv:2609.34035},
+  year    = {2026},
+}
+```
+
 ## References
 
+- M. Ogawa, Q. An and A. Yamashita. 3D Point Tracking with State Space Models.
+  arXiv:2609.34035, 2026.
 - A. Gu and T. Dao. Mamba: Linear-Time Sequence Modeling with Selective State Spaces.
   arXiv:2312.00752, 2023.
 - T. Dao and A. Gu. Transformers are SSMs: Generalized Models and Efficient Algorithms Through
