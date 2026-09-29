@@ -7,8 +7,7 @@ Mamba-3, which was designed for text.
 
 This is the vmamba3 operator code of the paper
 **[3D Point Tracking with State Space Models](https://arxiv.org/abs/2609.34035)**
-(M. Ogawa, Q. An and A. Yamashita, arXiv:2609.34035, 2026). The 3D point-tracking application
-is in [vmamba3-3Dpointtracker](https://github.com/MasahiroOgawa/vmamba3-3Dpointtracker).
+(M. Ogawa, Q. An and A. Yamashita, arXiv:2609.34035, 2026).
 
 ## 1. What is this repository
 
