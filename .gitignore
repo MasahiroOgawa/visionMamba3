@@ -25,8 +25,8 @@ build/
 *.bcf
 *.run.xml
 
-# Compiled documents (tex output). Keep reference papers under doc/original_paper/.
+# Compiled documents (tex output) and local copies of the reference papers, which are other
+# authors' copyrighted work and are cited in README.md rather than redistributed.
 *.pdf
-!doc/original_paper/*.pdf
 data/
 result/

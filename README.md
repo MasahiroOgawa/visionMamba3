@@ -67,8 +67,7 @@ visionMamba3/
 ├── tests/unit/                # pytest suite for the library and loaders
 ├── doc/
 │   ├── attention/             # paper: mamba3_attention.tex (+ generated table/plot)
-│   ├── mamba3_derivation/     # Mamba-3 derivation notes (.tex / .md)
-│   └── original_paper/        # reference PDFs (Mamba 1-3, VSSD, Depth-Anything-3)
+│   └── mamba3_derivation/     # Mamba-3 derivation notes (.tex / .md)
 ├── third_party/               # git submodules (official upstream, pinned)
 │   ├── mamba-ssm/             #   state-spaces/mamba — Triton SSD kernels
 │   └── depth-anything-3/      #   ByteDance-Seed/Depth-Anything-3 — teacher + DPT head
@@ -245,6 +244,19 @@ make -C doc/mamba3_derivation                  # mamba3_derivation.pdf
 ```
 
 The table script reads every number from the run directories, so a cell with no run prints `--`.
+
+## References
+
+- A. Gu and T. Dao. Mamba: Linear-Time Sequence Modeling with Selective State Spaces.
+  arXiv:2312.00752, 2023.
+- T. Dao and A. Gu. Transformers are SSMs: Generalized Models and Efficient Algorithms Through
+  Structured State Space Duality (Mamba-2). ICML, 2024. arXiv:2405.21060.
+- A. Lahoti, K. Y. Li, B. Chen, C. Wang, A. Bick, J. Z. Kolter, T. Dao and A. Gu. Mamba-3: Improved
+  Sequence Modeling using State Space Principles. arXiv:2603.15569, 2026.
+- Y. Shi, M. Li, M. Dong and C. Xu. VSSD: Vision Mamba with Non-Causal State Space Duality.
+  ICCV, 2025.
+- H. Lin, S. Chen, J. H. Liew, D. Y. Chen, Z. Li, G. Shi, J. Feng and B. Kang. Depth Anything 3:
+  Recovering the Visual Space from Any Views. arXiv:2511.10647, 2025.
 
 ## License
 
