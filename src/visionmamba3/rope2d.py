@@ -75,7 +75,7 @@ class RoPE2D(nn.Module):
         # This used to be `int(positions.max().item()) + 1`, a blocking GPU->CPU
         # synchronisation on every single call. Under gradient checkpointing that sync
         # runs again during recomputation, which happens on the AUTOGRAD ENGINE'S BACKWARD
-        # THREAD, and there it hung: a U4DR-G run stopped dead at step 230 with all 56
+        # THREAD, and there it hung: a U4DR-L run stopped dead at step 230 with all 56
         # CPU threads asleep in futex_do_wait, the GPU reporting 100% utilisation and
         # allocated memory flat to the byte. The faulthandler stack put the backward
         # thread exactly on that `.item()`. It reproduced three times, at two different
