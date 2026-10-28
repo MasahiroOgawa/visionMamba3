@@ -263,6 +263,10 @@ class Mamba3VSSDBetaGammaAttention(Mamba3VSSDAttention):
         pos: Optional[Tensor] = None,
         attn_mask: Optional[Tensor] = None,
     ) -> Tensor:
+        return self._finish(vssd_beta_gamma_forward(*self._streams(x, pos, attn_mask)))
+
+    def _streams(self, x: Tensor, pos: Optional[Tensor], attn_mask: Optional[Tensor]):
+        """``(B, C1, C2, V, m1, m2)`` of eq. (vssd-beta-gamma)."""
         B_t, C1, V_t, m1, rotate = self._project(x, pos, attn_mask)
 
         Bsz, T, _ = x.shape
@@ -277,5 +281,109 @@ class Mamba3VSSDBetaGammaAttention(Mamba3VSSDAttention):
         # in their weights, never in their parameterisation.
         A2_log = -F.softplus(p2[..., H * N :].transpose(1, 2) + self.A2_bias[None, :, None])
         m2 = self._mask_m(F.softplus(-A2_log), attn_mask)
+        return B_t, C1, C2, V_t, m1, m2
 
-        return self._finish(vssd_beta_gamma_forward(B_t, C1, C2, V_t, m1, m2))
+    # -- frame-causal streaming form -------------------------------------------
+
+    def enable_frame_stream(self, ref_frames: int) -> None:
+        """Add the per-head frame decay used by :meth:`forward_frames`.
+
+        ``ref_frames`` is the clip length the weights were trained on. The read is
+        scaled by ``ref_frames / c_t`` (``c_t`` the decayed frame count), so at the
+        last frame of such a clip, with decay 1, it equals the windowed pool exactly,
+        and on a long stream it stays at that clip's scale instead of growing.
+        """
+        if ref_frames < 1:
+            raise ValueError(f"ref_frames must be >= 1, got {ref_frames}")
+        self.frame_ref = int(ref_frames)
+        # gamma = exp(-softplus(p)); p = -10 gives gamma = 1 - 4.5e-5 per frame, so a
+        # warm-started stream matches the windowed operator to that relative error while
+        # gamma stays learnable (softplus has no flat region at p = -10 under Adam).
+        self.frame_decay = nn.Parameter(torch.full((self.num_heads,), -10.0))
+
+    def frame_gamma(self) -> Tensor:
+        return torch.exp(-F.softplus(self.frame_decay))
+
+    def _frame_rotation(self, row_step: int, device, dtype) -> Optional[tuple[Tensor, Tensor]]:
+        """cos/sin of the per-frame state rotation, or None without 2-D RoPE.
+
+        The windowed mixer separates frame v by a RoPE row offset ``y + v*row_step``.
+        RoPE scores depend only on angle differences, so the same separation is a
+        rotation of the stored state by ``-row_step`` rows per elapsed frame, on the
+        row-encoded planes (first half of N) only. Computed from the angle, not from
+        RoPE's position table, so no frame index ever leaves the table.
+        """
+        if self.rope is None:
+            return None
+        n_pairs = self.state_dim // 4
+        exps = torch.arange(n_pairs, device=device, dtype=torch.float64) / n_pairs
+        angle = -float(row_step) / (float(self.rope.base_frequency) ** exps)
+        return angle.cos().to(dtype), angle.sin().to(dtype)
+
+    @staticmethod
+    def _rotate_state(S: Tensor, rot: Optional[tuple[Tensor, Tensor]]) -> Tensor:
+        """Rotate the row-encoded state planes of ``S`` (b, H, N, d)."""
+        if rot is None:
+            return S
+        cos, sin = (t[:, None] for t in rot)
+        n_half = S.shape[2] // 2
+        pairs = S[:, :, :n_half].unflatten(2, (n_half // 2, 2))
+        s0, s1 = pairs[..., 0, :], pairs[..., 1, :]
+        rowpart = torch.stack([s0 * cos - s1 * sin, s0 * sin + s1 * cos], dim=3).flatten(2, 3)
+        return torch.cat([rowpart, S[:, :, n_half:]], dim=2)
+
+    def forward_frames(
+        self,
+        x: Tensor,
+        pos: Optional[Tensor],
+        n_frames: int,
+        row_step: int,
+        state: Optional[tuple[Tensor, Tensor, Tensor]] = None,
+    ) -> tuple[Tensor, tuple[Tensor, Tensor, Tensor]]:
+        """Frame-causal eq. (vssd-beta-gamma): each frame reads itself and the past.
+
+        Args:
+            x: (b, n_frames*T, D), frame-major.
+            pos: (b, n_frames*T, 2) WITHIN-frame (y, x) positions -- no frame offset;
+                the offset is the state rotation (:meth:`_frame_rotation`).
+            n_frames: frames in ``x``.
+            row_step: token rows per frame (the windowed offset's ``gh``).
+            state: ``(S1, S2, c)`` from the previous call, or None to start a stream.
+
+        Per frame t, with P^(k)_t the frame's own pool (B (*) m^(k))^T V:
+
+            S^(k)_t = gamma R S^(k)_{t-1} + P^(k)_t,   c_t = gamma c_{t-1} + 1,
+            Y_t     = (ref / c_t) * sum_k C^(k)_t S^(k)_t.
+
+        Calling it once on n frames or n times on one frame gives the same result.
+        """
+        if not hasattr(self, "frame_decay"):
+            raise RuntimeError("forward_frames needs enable_frame_stream() first")
+        B_t, C1, C2, V_t, m1, m2 = self._streams(x, pos, None)
+        Bsz, H, L, N = B_t.shape
+        if L % n_frames:
+            raise ValueError(f"{L} tokens do not split into {n_frames} frames")
+
+        def frames(t: Tensor) -> Tensor:
+            return t.unflatten(2, (n_frames, L // n_frames))
+
+        Bf, Vf, C1f, C2f = frames(B_t), frames(V_t), frames(C1), frames(C2)
+        P1 = torch.einsum("bhvtn,bhvtd->bhvnd", Bf * frames(m1).unsqueeze(-1), Vf)
+        P2 = torch.einsum("bhvtn,bhvtd->bhvnd", Bf * frames(m2).unsqueeze(-1), Vf)
+        if state is None:
+            S1 = torch.zeros_like(P1[:, :, 0])
+            S2 = torch.zeros_like(P2[:, :, 0])
+            c = torch.zeros(Bsz, H, device=x.device, dtype=P1.dtype)
+        else:
+            S1, S2, c = state
+        gamma = self.frame_gamma().to(P1.dtype)
+        rot = self._frame_rotation(row_step, x.device, P1.dtype)
+        ys = []
+        for v in range(n_frames):
+            S1 = gamma[None, :, None, None] * self._rotate_state(S1, rot) + P1[:, :, v]
+            S2 = gamma[None, :, None, None] * self._rotate_state(S2, rot) + P2[:, :, v]
+            c = gamma[None] * c + 1
+            y = (torch.einsum("bhtn,bhnd->bhtd", C1f[:, :, v], S1)
+                 + torch.einsum("bhtn,bhnd->bhtd", C2f[:, :, v], S2))
+            ys.append(y * (self.frame_ref / c)[..., None, None])
+        return self._finish(torch.cat(ys, dim=2)), (S1, S2, c)
