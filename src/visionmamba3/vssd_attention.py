@@ -296,10 +296,15 @@ class Mamba3VSSDBetaGammaAttention(Mamba3VSSDAttention):
         if ref_frames < 1:
             raise ValueError(f"ref_frames must be >= 1, got {ref_frames}")
         self.frame_ref = int(ref_frames)
-        # gamma = exp(-softplus(p)); p = -10 gives gamma = 1 - 4.5e-5 per frame, so a
-        # warm-started stream matches the windowed operator to that relative error while
-        # gamma stays learnable (softplus has no flat region at p = -10 under Adam).
-        self.frame_decay = nn.Parameter(torch.full((self.num_heads,), -10.0))
+        # gamma = exp(-softplus(p)), initialised to 1 - 1/ref_frames. Then in steady state
+        # c = ref_frames and the read is P_t + gamma P_{t-1} + ...: the current frame has
+        # weight 1 and the past ref_frames - 1 in total, as the last frame of a training
+        # clip has. gamma = 1 would match that clip exactly at its last frame but turn
+        # the read into the mean of the whole stream, in which the current frame's share
+        # falls as 1/t. ref_frames = 1 (no cross-frame context in training) gives gamma ~ 0.
+        g = 1.0 - 1.0 / ref_frames
+        p = math.log(math.expm1(-math.log(g))) if g > 0 else 20.0
+        self.frame_decay = nn.Parameter(torch.full((self.num_heads,), p))
 
     def frame_gamma(self) -> Tensor:
         return torch.exp(-F.softplus(self.frame_decay))
