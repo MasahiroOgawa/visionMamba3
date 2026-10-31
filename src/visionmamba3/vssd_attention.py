@@ -394,7 +394,6 @@ class Mamba3VSSD2PoolAttention(Mamba3VSSDAttention):
         return self._finish(torch.cat(ys, dim=2)), (S1, S2, c)
 
 
-# Renamed 2026-10-31 (VSSD-2pool -> VSSD-2pool, matching the name the doc and every
-# results table already used). Kept because consumers look this class up BY NAME at
-# import time and a miss degrades to plain attention without raising.
+# Former name of Mamba3VSSD2PoolAttention. Consumers resolve this class BY NAME at import
+# time, so a checkout pinned to the old name keeps building.
 Mamba3VSSDBetaGammaAttention = Mamba3VSSD2PoolAttention

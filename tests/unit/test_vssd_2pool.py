@@ -20,8 +20,9 @@ import torch
 
 from visionmamba3.rope2d import RoPE2D
 from visionmamba3.vssd_attention import (
-    Mamba3VSSDAttention,
     Mamba3VSSD2PoolAttention,
+    Mamba3VSSDAttention,
+    Mamba3VSSDBetaGammaAttention,
     vssd_2pool_forward,
     vssd_forward,
 )
@@ -251,3 +252,9 @@ def test_cpu_and_cuda_agree():
     y_cpu = attn(x)
     y_cuda = attn.cuda()(x.cuda()).cpu()
     assert torch.allclose(y_cpu, y_cuda, atol=1e-9)
+
+
+def test_former_name_still_resolves():
+    """Consumers resolve the class by name at import time; a pin to the old name must
+    keep building, so the alias is load-bearing rather than decorative."""
+    assert Mamba3VSSDBetaGammaAttention is Mamba3VSSD2PoolAttention
