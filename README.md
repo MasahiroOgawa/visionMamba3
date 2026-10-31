@@ -29,7 +29,7 @@ tokens, and evaluates them:
 |---|---|
 | `Mamba3SelfAttention` | Scan-based SSD self-attention. Bidirectional (2 scan directions) or 4-directional (adds column-major scans), Mamba-3 three-term (trapezoidal) or Mamba-2 two-term mask, optional fused Triton kernel from `mamba_ssm`. |
 | `Mamba3VSSDAttention` | Non-causal SSD (NC-SSD, after VSSD, ICCV 2025): the mask collapses to a per-token scalar, so there is no scan order. |
-| `Mamba3VSSDBetaGammaAttention` | NC-SSD with a second, independently-read pool (VSSD-β,γ). |
+| `Mamba3VSSD2PoolAttention` | NC-SSD with a second, independently-read pool (VSSD-β,γ). |
 | `Mamba3CrossAttention` | SSD cross-attention between a query stream and a key/value stream, linear in T. |
 | `RoPE2D` | 2-D rotary position embedding for image tokens, sharing its rotation-pair layout with Mamba-3's internal complex rotary. |
 
@@ -52,7 +52,7 @@ visionMamba3/
 ├── src/
 │   ├── visionmamba3/          # the library: pure, reusable attention modules
 │   │   ├── self_attention.py  #   Mamba3SelfAttention (scan SSD, reference + fused paths)
-│   │   ├── vssd_attention.py  #   Mamba3VSSDAttention, Mamba3VSSDBetaGammaAttention (NC-SSD)
+│   │   ├── vssd_attention.py  #   Mamba3VSSDAttention, Mamba3VSSD2PoolAttention (NC-SSD)
 │   │   ├── cross_attention.py #   Mamba3CrossAttention
 │   │   ├── mask.py            #   structured decay-mask builders (two-/three-term, cross)
 │   │   ├── projections.py     #   AttentionProjections, BCNorm

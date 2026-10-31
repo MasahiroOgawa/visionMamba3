@@ -1,7 +1,7 @@
-"""Unit tests for visionmamba3.vssd_attention.Mamba3VSSDBetaGammaAttention.
+"""Unit tests for visionmamba3.vssd_attention.Mamba3VSSD2PoolAttention.
 
 Verifies the operator derived in doc/attention/mamba3_attention.tex
-section 6.7.9, eq. (vssd-beta-gamma):
+section 6.7.9, eq. (vssd-2pool):
 
     Y = C1 ((B (*) m1)^T X) + C2 ((B (*) m2)^T X)
 
@@ -21,15 +21,15 @@ import torch
 from visionmamba3.rope2d import RoPE2D
 from visionmamba3.vssd_attention import (
     Mamba3VSSDAttention,
-    Mamba3VSSDBetaGammaAttention,
-    vssd_beta_gamma_forward,
+    Mamba3VSSD2PoolAttention,
+    vssd_2pool_forward,
     vssd_forward,
 )
 
 
 def _mk(**kw):
     torch.manual_seed(0)
-    return Mamba3VSSDBetaGammaAttention(dim=32, num_heads=4, state_dim=8, **kw)
+    return Mamba3VSSD2PoolAttention(dim=32, num_heads=4, state_dim=8, **kw)
 
 
 # --------------------------------------------------------------- basic contract
@@ -63,7 +63,7 @@ def test_closed_form_is_the_sum_of_two_gamma_pools():
     m1 = torch.rand(Bsz, H, T, dtype=torch.float64)
     m2 = torch.rand(Bsz, H, T, dtype=torch.float64)
 
-    got = vssd_beta_gamma_forward(B, C1, C2, V, m1, m2)
+    got = vssd_2pool_forward(B, C1, C2, V, m1, m2)
     want = vssd_forward(B, C1, V, m1) + vssd_forward(B, C2, V, m2)
     assert torch.allclose(got, want)
 
@@ -85,7 +85,7 @@ def test_shared_query_collapses_exactly():
     m1 = torch.rand(Bsz, H, T, dtype=torch.float64)
     m2 = torch.rand(Bsz, H, T, dtype=torch.float64)
 
-    two_pools_shared_q = vssd_beta_gamma_forward(B, C, C, V, m1, m2)
+    two_pools_shared_q = vssd_2pool_forward(B, C, C, V, m1, m2)
     one_pool_combined_m = vssd_forward(B, C, V, m1 + m2)
     assert torch.allclose(two_pools_shared_q, one_pool_combined_m, atol=1e-12)
 
@@ -105,7 +105,7 @@ def test_independent_query_does_not_collapse():
     m1 = torch.rand(Bsz, H, T, dtype=torch.float64)
     m2 = torch.rand(Bsz, H, T, dtype=torch.float64)
 
-    two_pools = vssd_beta_gamma_forward(B, C1, C2, V, m1, m2)
+    two_pools = vssd_2pool_forward(B, C1, C2, V, m1, m2)
     assert not torch.allclose(two_pools, vssd_forward(B, C1, V, m1 + m2), atol=1e-6)
 
     # Stronger: least-squares-fit the best single-pool m through C1 and show a
@@ -220,7 +220,7 @@ def test_rope_and_rotary_run_and_change_output():
 
 def test_costs_one_extra_query_and_scalar_against_gamma():
     gamma = Mamba3VSSDAttention(dim=32, num_heads=4, state_dim=8)
-    bg = Mamba3VSSDBetaGammaAttention(dim=32, num_heads=4, state_dim=8)
+    bg = Mamba3VSSD2PoolAttention(dim=32, num_heads=4, state_dim=8)
     n_gamma = sum(p.numel() for p in gamma.parameters())
     n_bg = sum(p.numel() for p in bg.parameters())
     H, N = 4, 8
@@ -234,7 +234,7 @@ def test_costs_one_extra_query_and_scalar_against_gamma():
 
 def test_accepts_the_same_kwargs_as_the_other_operators():
     """install_mamba3 passes one kwarg set regardless of variant."""
-    attn = Mamba3VSSDBetaGammaAttention(
+    attn = Mamba3VSSD2PoolAttention(
         dim=32, num_heads=4, state_dim=8, bidirectional=True, three_term=True,
         row_renorm=True, chunk_size=64, use_fused_kernel=True,
         out_proj=True, proj_bias=False, post_norm=True,
@@ -246,7 +246,7 @@ def test_cpu_and_cuda_agree():
     if not torch.cuda.is_available():
         return
     torch.manual_seed(0)
-    attn = Mamba3VSSDBetaGammaAttention(dim=32, num_heads=4, state_dim=8).double()
+    attn = Mamba3VSSD2PoolAttention(dim=32, num_heads=4, state_dim=8).double()
     x = torch.randn(2, 7, 32, dtype=torch.float64)
     y_cpu = attn(x)
     y_cuda = attn.cuda()(x.cuda()).cpu()

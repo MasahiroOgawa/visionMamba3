@@ -1764,7 +1764,7 @@ replicating \eqref{eq:nc-Y} per head.'' Give the $\beta$-motivated
 pool its \emph{own} query projection $\bm{C}^{(2)}$, independent of
 the $\gamma$-pool's $\bm{C}^{(1)}:=\bm{C}$, so the two terms can no
 longer be merged by factoring out a common $\bm{C}$:
-\begin{equation}\label{eq:vssd-beta-gamma}
+\begin{equation}\label{eq:vssd-2pool}
   \boxed{\;\bm{Y} \;=\; \bm{C}^{(1)}\bigl((\bm{B}\odot\bm{m}^{(1)})^\top\bm{X}\bigr)
         \;+\; \bm{C}^{(2)}\bigl((\bm{B}\odot\bm{m}^{(2)})^\top\bm{X}\bigr),\;}
 \end{equation}
@@ -1791,7 +1791,7 @@ $O(ND)$ state and compute, still $O(TND)$ overall, still independent
 of $T$ in memory, and still strictly cheaper than bidirectional SSD's
 $O(T^2(N+D))$ once $T$ is large.
 
-\paragraph{What this is and is not.} Equation~\eqref{eq:vssd-beta-gamma}
+\paragraph{What this is and is not.} Equation~\eqref{eq:vssd-2pool}
 is a motivated \emph{extension}, not a proof that the second head
 recovers Mamba-3's $\beta$-band behaviour --- it gives the operator
 comparable \emph{capacity} (a second, independently-weighted global

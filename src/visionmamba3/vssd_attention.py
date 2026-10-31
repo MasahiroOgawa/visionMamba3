@@ -138,7 +138,7 @@ class Mamba3VSSDAttention(nn.Module):
         B_t, C_t, V_t, m, _rotate = self._project(x, pos, attn_mask)
         return self._finish(vssd_forward(B_t, C_t, V_t, m))
 
-    # -- shared front/back halves, reused by Mamba3VSSDBetaGammaAttention ------
+    # -- shared front/back halves, reused by Mamba3VSSD2PoolAttention ------
 
     def _project(self, x: Tensor, pos: Optional[Tensor], attn_mask: Optional[Tensor]):
         """Project, apply both positional encodings, and build m.
@@ -199,10 +199,10 @@ class Mamba3VSSDAttention(nn.Module):
         return self.proj(self.post_norm(y))
 
 
-def vssd_beta_gamma_forward(
+def vssd_2pool_forward(
     B: Tensor, C1: Tensor, C2: Tensor, V: Tensor, m1: Tensor, m2: Tensor
 ) -> Tensor:
-    """Apply the VSSD-beta,gamma output formula, doc eq. (vssd-beta-gamma):
+    """Apply the VSSD-2pool output formula, doc eq. (vssd-2pool):
 
         Y = C1 ((B (*) m1)^T X) + C2 ((B (*) m2)^T X)
 
@@ -217,15 +217,15 @@ def vssd_beta_gamma_forward(
     which is plain VSSD-gamma with a combined weight vector -- the second pool
     would be unable to express anything the first could not, since a shared C
     sums the rows away before the output is formed. Giving pool 2 its own query
-    is what stops that factoring. ``tests/unit/test_vssd_beta_gamma.py`` asserts
+    is what stops that factoring. ``tests/unit/test_vssd_2pool.py`` asserts
     both halves: that sharing C collapses exactly, and that not sharing it does
     not.
     """
     return vssd_forward(B, C1, V, m1) + vssd_forward(B, C2, V, m2)
 
 
-class Mamba3VSSDBetaGammaAttention(Mamba3VSSDAttention):
-    """VSSD-beta,gamma self-attention (doc section 6.7.9, eq. vssd-beta-gamma).
+class Mamba3VSSD2PoolAttention(Mamba3VSSDAttention):
+    """VSSD-2pool self-attention (doc section 6.7.9, eq. vssd-2pool).
 
     VSSD-gamma's mask collapses to one per-token scalar, which carries no |i-j|
     term at all. This variant adds a second, independently-read global pool,
@@ -263,10 +263,10 @@ class Mamba3VSSDBetaGammaAttention(Mamba3VSSDAttention):
         pos: Optional[Tensor] = None,
         attn_mask: Optional[Tensor] = None,
     ) -> Tensor:
-        return self._finish(vssd_beta_gamma_forward(*self._streams(x, pos, attn_mask)))
+        return self._finish(vssd_2pool_forward(*self._streams(x, pos, attn_mask)))
 
     def _streams(self, x: Tensor, pos: Optional[Tensor], attn_mask: Optional[Tensor]):
-        """``(B, C1, C2, V, m1, m2)`` of eq. (vssd-beta-gamma)."""
+        """``(B, C1, C2, V, m1, m2)`` of eq. (vssd-2pool)."""
         B_t, C1, V_t, m1, rotate = self._project(x, pos, attn_mask)
 
         Bsz, T, _ = x.shape
@@ -345,7 +345,7 @@ class Mamba3VSSDBetaGammaAttention(Mamba3VSSDAttention):
         row_step: int,
         state: Optional[tuple[Tensor, Tensor, Tensor]] = None,
     ) -> tuple[Tensor, tuple[Tensor, Tensor, Tensor]]:
-        """Frame-causal eq. (vssd-beta-gamma): each frame reads itself and the past.
+        """Frame-causal eq. (vssd-2pool): each frame reads itself and the past.
 
         Args:
             x: (b, n_frames*T, D), frame-major.
@@ -392,3 +392,9 @@ class Mamba3VSSDBetaGammaAttention(Mamba3VSSDAttention):
                  + torch.einsum("bhtn,bhnd->bhtd", C2f[:, :, v], S2))
             ys.append(y * (self.frame_ref / c)[..., None, None])
         return self._finish(torch.cat(ys, dim=2)), (S1, S2, c)
+
+
+# Renamed 2026-10-31 (VSSD-2pool -> VSSD-2pool, matching the name the doc and every
+# results table already used). Kept because consumers look this class up BY NAME at
+# import time and a miss degrades to plain attention without raising.
+Mamba3VSSDBetaGammaAttention = Mamba3VSSD2PoolAttention
