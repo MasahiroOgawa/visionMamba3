@@ -1,4 +1,4 @@
-"""Frame-causal streaming form of VSSD-beta,gamma (Mamba3VSSDBetaGammaAttention.forward_frames).
+"""Frame-causal streaming form of VSSD-2pool (Mamba3VSSD2PoolAttention.forward_frames).
 
 What must hold for a window-free stream to be trustworthy:
 * one call on n frames equals n calls on one frame with the state carried (so a stream
@@ -13,7 +13,7 @@ from __future__ import annotations
 import torch
 
 from visionmamba3.rope2d import RoPE2D
-from visionmamba3.vssd_attention import Mamba3VSSDBetaGammaAttention
+from visionmamba3.vssd_attention import Mamba3VSSD2PoolAttention
 
 GH, GW = 3, 4                       # token grid per frame
 T = GH * GW
@@ -21,7 +21,7 @@ T = GH * GW
 
 def _mk(ref: int, gamma_one: bool = False):
     torch.manual_seed(0)
-    attn = Mamba3VSSDBetaGammaAttention(dim=32, num_heads=4, state_dim=8, rope=RoPE2D()).double()
+    attn = Mamba3VSSD2PoolAttention(dim=32, num_heads=4, state_dim=8, rope=RoPE2D()).double()
     torch.nn.init.normal_(attn.proj2.weight, std=0.2)      # both pools active
     attn.enable_frame_stream(ref)
     attn.double()

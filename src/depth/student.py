@@ -40,8 +40,8 @@ from depth_anything_3.model.dinov2.vision_transformer import vit_small  # noqa: 
 
 from visionmamba3.self_attention import Mamba3SelfAttention  # noqa: E402
 from visionmamba3.vssd_attention import (  # noqa: E402
+    Mamba3VSSD2PoolAttention,
     Mamba3VSSDAttention,
-    Mamba3VSSDBetaGammaAttention,
 )
 
 
@@ -72,7 +72,7 @@ class _MixerBlock(nn.Module):
         elif mixer == "vssd":
             self.inner = Mamba3VSSDAttention(**common)
         elif mixer == "vssd_bg":
-            self.inner = Mamba3VSSDBetaGammaAttention(**common)
+            self.inner = Mamba3VSSD2PoolAttention(**common)
         else:
             raise ValueError(f"unknown mixer {mixer!r}; expected bidirectional|vssd|vssd_bg")
 

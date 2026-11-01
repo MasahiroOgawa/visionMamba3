@@ -11,7 +11,7 @@ only the token mixer is swapped:
   vit_mamba3       -> Mamba3SelfAttention, 2-directional (row-major fwd+rev)
   vit_mamba3_4dir  -> Mamba3SelfAttention, 4-directional (+ column-major)
   vit_mamba3_vssd  -> Mamba3VSSDAttention (VSSD-gamma, non-causal)
-  vit_mamba3_vssd_bg -> Mamba3VSSDBetaGammaAttention (VSSD-beta,gamma; two pools)
+  vit_mamba3_vssd_bg -> Mamba3VSSD2PoolAttention (VSSD-2pool; two pools)
 
 The mamba mixers are built exactly as the retired ``da3_adapter`` wrappers
 built them, and are placed as ``block.attn`` in place of the softmax module,
@@ -29,8 +29,8 @@ import torch.nn.functional as F
 from visionmamba3.rope2d import RoPE2D
 from visionmamba3.self_attention import Mamba3SelfAttention
 from visionmamba3.vssd_attention import (
+    Mamba3VSSD2PoolAttention,
     Mamba3VSSDAttention,
-    Mamba3VSSDBetaGammaAttention,
 )
 
 # The direction count lives in the variant name rather than in a flag: these are
@@ -54,7 +54,7 @@ _MAMBA3_ROTARY_DEFAULT = {
     "vit_mamba3": False,
     "vit_mamba3_4dir": False,
     "vit_mamba3_vssd": True,
-    # VSSD-beta,gamma inherits VSSD-gamma's reason for wanting the rotary: both
+    # VSSD-2pool inherits VSSD-gamma's reason for wanting the rotary: both
     # pools' masks are per-token scalars with no |i-j| term, so the rotary is
     # still their only relative-position signal. Untested for this variant --
     # the 3x3 grid measures it.
@@ -66,7 +66,7 @@ _MAMBA3_ROTARY_DEFAULT = {
 # how many global pools they read, so one build branch serves both.
 _VSSD_CLASSES = {
     "vit_mamba3_vssd": (Mamba3VSSDAttention, "VSSD-gamma"),
-    "vit_mamba3_vssd_bg": (Mamba3VSSDBetaGammaAttention, "VSSD-beta,gamma"),
+    "vit_mamba3_vssd_bg": (Mamba3VSSD2PoolAttention, "VSSD-2pool"),
 }
 
 

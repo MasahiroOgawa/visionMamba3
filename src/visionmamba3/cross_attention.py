@@ -44,12 +44,12 @@ class Mamba3CrossAttention(nn.Module):
                         exists only to check the collapse against a direct transcription of the
                         formula.
         out_proj:       apply output linear if True
-        two_pool:       add a second, independently-read pool (VSSD-beta,gamma). Variant B's
+        two_pool:       add a second, independently-read pool (VSSD-2pool). Variant B's
                         mask is rank-1 across the query axis -- every query row of L_cross is
                         identical -- so one pool applies the same weighting over the kv
                         sequence to every query. A second pool with its OWN query projection
                         and its own per-token vector lifts that restriction, which is the
-                        construction of the paper's VSSD-beta,gamma. Its contribution is
+                        construction of the paper's VSSD-2pool. Its contribution is
                         scaled by a parameter initialised to zero, so a freshly-built
                         two-pool layer is numerically identical to a one-pool layer and a
                         fine-tune starts exactly at the one-pool result rather than at a
